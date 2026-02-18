@@ -1,0 +1,27 @@
+
+[
+  {
+    "id": "t-1",
+    "name": "Cuna de Campeones",
+    "ownerEmail": "mati@woombi.com",
+    "members": ["mati@woombi.com", "veron@edlp.com", "boselli@edlp.com", "sabella@edlp.com", "bilardo@edlp.com", "andujar@edlp.com", "brana@edlp.com", "carrillo@edlp.com", "ascacibar@edlp.com", "sosa@edlp.com", "enzo@edlp.com"]
+  },
+  {
+    "id": "t-2",
+    "name": "Torneo del 7 a 0",
+    "ownerEmail": "veron@edlp.com",
+    "members": ["veron@edlp.com", "calderon@edlp.com", "pavone@edlp.com", "luguerico@edlp.com", "farfante@edlp.com", "piatti@edlp.com", "zuqui@edlp.com", "mancuso@edlp.com", "benitez@edlp.com"]
+  },
+  {
+    "id": "t-3",
+    "name": "Mística Pincharrata",
+    "ownerEmail": "sabella@edlp.com",
+    "members": ["sabella@edlp.com", "desabato@edlp.com", "cellay@edlp.com", "re@edlp.com", "sosa_turco@edlp.com", "pellegrino@edlp.com", "fernandez@edlp.com", "mercado@edlp.com", "rojo@edlp.com"]
+  },
+  {
+    "id": "t-4",
+    "name": "Bilardismo Puro",
+    "ownerEmail": "bilardo@edlp.com",
+    "members": ["bilardo@edlp.com", "zubeldia@edlp.com", "conigliaro@edlp.com", "malbernat@edlp.com", "poletti@edlp.com", "pachame@edlp.com", "togneri@edlp.com", "madero@edlp.com", "veron_padre@edlp.com", "pachame@edlp.com"]
+  }
+]
