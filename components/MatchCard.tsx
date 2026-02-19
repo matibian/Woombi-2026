@@ -16,29 +16,48 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
 
   useEffect(() => {
     const checkLock = () => {
-      const matchTime = new Date(match.date).getTime();
+      if (match.status === 'finalizado') {
+        setIsLocked(true);
+        return;
+      }
+      const matchTime = new Date(match.match_date).getTime();
       const now = new Date().getTime();
       const oneHour = 60 * 60 * 1000;
-      // Bloquear si falta menos de una hora
       if (matchTime - now < oneHour) {
         setIsLocked(true);
       }
     };
     
     checkLock();
-    const timer = setInterval(checkLock, 60000); // Check every minute
+    const timer = setInterval(checkLock, 60000);
     return () => clearInterval(timer);
-  }, [match.date]);
+  }, [match.match_date, match.status]);
 
   const handleScoreChange = (side: 'home' | 'away', val: string) => {
     if (isLocked) return;
     const num = parseInt(val) || 0;
-    // Forzamos que el número nunca sea negativo
-    const sanitizedNum = Math.max(0, num);
+    const sanitizedNum = Math.max(0, Math.min(20, num));
+    
+    const newPrediction: UserPrediction = {
+      ...prediction,
+      match_id: match.id,
+      predicted_home_score: side === 'home' ? sanitizedNum : (prediction?.predicted_home_score || 0),
+      predicted_away_score: side === 'away' ? sanitizedNum : (prediction?.predicted_away_score || 0),
+    };
+
+    // Si deja de ser empate, reseteamos el ganador seleccionado
+    if (newPrediction.predicted_home_score !== newPrediction.predicted_away_score) {
+      newPrediction.predicted_winner_id = null;
+    }
+
+    onUpdate(newPrediction);
+  };
+
+  const handleWinnerSelect = (teamId: string | number) => {
+    if (isLocked) return;
     onUpdate({
-      matchId: match.id,
-      homeScore: side === 'home' ? sanitizedNum : (prediction?.homeScore || 0),
-      awayScore: side === 'away' ? sanitizedNum : (prediction?.awayScore || 0),
+      ...prediction!,
+      predicted_winner_id: teamId
     });
   };
 
@@ -51,105 +70,137 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
 
   const getFlagUrl = (code: string) => `https://flagcdn.com/w160/${code.toLowerCase()}.png`;
 
+  const isKnockout = match.stage !== 'fase_grupos';
+  const isDrawPredicted = prediction && prediction.predicted_home_score === prediction.predicted_away_score && prediction.predicted_home_score !== null;
+
   return (
-    <div className={`bg-white rounded-2xl sm:rounded-[2rem] shadow-sm border border-slate-200 p-4 sm:p-5 transition-all hover:shadow-xl hover:-translate-y-1 border-l-4 sm:border-l-[6px] relative overflow-hidden group ${isLocked ? 'border-l-slate-400 opacity-95 grayscale-[0.3]' : 'border-l-[#002868]'}`}>
+    <div className={`bg-white rounded-[2rem] shadow-sm border border-slate-200 p-5 transition-all hover:shadow-xl border-l-4 relative overflow-hidden group ${isLocked ? 'border-l-slate-400' : 'border-l-[#002868]'}`}>
       
-      {isLocked && (
-        <div className="absolute top-0 right-0 w-6 h-6 sm:w-8 sm:h-8 bg-slate-800 text-white flex items-center justify-center rounded-bl-xl sm:rounded-bl-2xl shadow-sm z-10">
-          <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" /></svg>
+      {isLocked && match.status !== 'finalizado' && (
+        <div className="absolute top-0 right-0 w-8 h-8 bg-slate-800 text-white flex items-center justify-center rounded-bl-2xl z-10">
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" /></svg>
         </div>
       )}
 
-      {prediction && !isLocked && (
-        <div className="absolute top-0 right-0 w-6 h-6 sm:w-8 sm:h-8 bg-[#006341] text-white flex items-center justify-center rounded-bl-xl sm:rounded-bl-2xl shadow-sm z-10 animate-in fade-in zoom-in">
-          <svg className="w-3 h-3 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7" /></svg>
+      {match.status === 'finalizado' && (
+        <div className="absolute top-0 right-0 bg-green-500 text-white px-3 py-1 rounded-bl-xl text-[8px] font-black uppercase tracking-widest z-10">
+          Finalizado
         </div>
       )}
 
-      <div className="flex items-center justify-between mb-3 sm:mb-4 text-[8px] sm:text-[9px] font-black text-slate-400 uppercase tracking-[0.1em] sm:tracking-[0.2em]">
-        <div className="flex items-center gap-1.5 sm:gap-2">
-            <span className={`px-2 py-0.5 rounded-lg border border-slate-200 ${isLocked ? 'bg-slate-100 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>GRUPO {match.group}</span>
-            {isLocked && <span className="text-red-500 italic">CERRADO</span>}
-        </div>
-        <span className="italic">{new Date(match.date).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' }).toUpperCase()}</span>
+      <div className="flex items-center justify-between mb-4 text-[9px] font-black text-slate-400 uppercase tracking-widest italic">
+        <span className="bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 uppercase">
+          {match.stage.replace('_', ' ')}
+        </span>
+        <span>{new Date(match.match_date).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })} - {new Date(match.match_date).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
 
-      <div className="flex items-center justify-between gap-1.5 sm:gap-2">
-        <div className="flex-1 flex flex-col items-center gap-1.5 sm:gap-2 group/team">
-          <div className="relative">
-            <img 
-              src={getFlagUrl(match.homeTeam.code)} 
-              alt={match.homeTeam.name}
-              className="w-10 h-6 sm:w-14 sm:h-9 object-cover rounded-md sm:rounded-lg shadow-md border border-slate-50 group-hover/team:scale-110 transition-transform"
-            />
-          </div>
-          <div className="font-black text-slate-800 text-[10px] sm:text-[11px] text-center leading-tight uppercase tracking-tight h-6 sm:h-8 flex items-center italic">
-            {match.homeTeam.name}
-          </div>
-        </div>
-
-        <div className={`flex items-center gap-1 sm:gap-2 p-1 sm:p-2 rounded-xl sm:rounded-2xl border shadow-inner transition-colors ${isLocked ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-100'}`}>
-          <input
-            type="number"
-            min="0"
-            disabled={isLocked}
-            className={`w-10 h-10 sm:w-12 sm:h-14 text-center text-lg sm:text-2xl font-black border-2 border-transparent rounded-lg sm:rounded-xl focus:border-[#002868] focus:ring-4 ring-[#002868]/10 outline-none transition-all shadow-sm ${isLocked ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-white text-slate-900 font-black'}`}
-            value={prediction?.homeScore ?? ''}
-            onChange={(e) => handleScoreChange('home', e.target.value)}
-            placeholder="0"
+      <div className="flex items-center justify-between gap-2 sm:gap-4">
+        {/* Home Team */}
+        <div className="flex-1 flex flex-col items-center gap-2">
+          <img 
+            src={match.home_team?.fifa_code ? getFlagUrl(match.home_team.fifa_code) : ''} 
+            className={`w-12 h-8 sm:w-14 sm:h-9 object-cover rounded-lg shadow-md border border-slate-50 ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.home_team?.id ? 'opacity-40 grayscale' : ''}`}
+            alt="flag"
           />
-          <div className="flex flex-col items-center opacity-20">
-            <div className="w-0.5 h-0.5 sm:w-1 sm:h-1 bg-slate-900 rounded-full mb-0.5 sm:mb-1"></div>
-            <div className="w-0.5 h-0.5 sm:w-1 sm:h-1 bg-slate-900 rounded-full"></div>
-          </div>
-          <input
-            type="number"
-            min="0"
-            disabled={isLocked}
-            className={`w-10 h-10 sm:w-12 sm:h-14 text-center text-lg sm:text-2xl font-black border-2 border-transparent rounded-lg sm:rounded-xl focus:border-[#002868] focus:ring-4 ring-[#002868]/10 outline-none transition-all shadow-sm ${isLocked ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-white text-slate-900 font-black'}`}
-            value={prediction?.awayScore ?? ''}
-            onChange={(e) => handleScoreChange('away', e.target.value)}
-            placeholder="0"
-          />
-        </div>
-
-        <div className="flex-1 flex flex-col items-center gap-1.5 sm:gap-2 group/team">
-          <div className="relative">
-            <img 
-              src={getFlagUrl(match.awayTeam.code)} 
-              alt={match.awayTeam.name}
-              className="w-10 h-6 sm:w-14 sm:h-9 object-cover rounded-md sm:rounded-lg shadow-md border border-slate-50 group-hover/team:scale-110 transition-transform"
-            />
-          </div>
-          <div className="font-black text-slate-800 text-[10px] sm:text-[11px] text-center leading-tight uppercase tracking-tight h-6 sm:h-8 flex items-center italic">
-            {match.awayTeam.name}
+          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center">
+            {match.home_team?.name || 'TBD'}
           </div>
         </div>
-      </div>
 
-      <div className="mt-4 sm:mt-5 pt-2 sm:pt-3 border-t border-dashed border-slate-100 flex flex-col items-center">
-        <button
-          onClick={fetchAIHelp}
-          disabled={loading || isLocked}
-          className="text-[8px] sm:text-[9px] text-[#002868] hover:text-[#CE1126] font-black flex items-center gap-1.5 sm:gap-2 bg-[#002868]/5 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full transition-all disabled:opacity-30 uppercase tracking-widest border border-transparent hover:border-[#002868]/20 shadow-sm"
-        >
-          {loading ? (
-            <span className="flex items-center gap-1.5 sm:gap-2">
-              <span className="animate-spin text-sm sm:text-lg">✨</span> IA...
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 sm:gap-2">
-              <span className="text-xs sm:text-sm">✨</span> VAR (IA)
-            </span>
+        {/* Prediction vs Real Result */}
+        <div className="flex flex-col items-center gap-2">
+          {/* Real Result (Only if finished) */}
+          {match.status === 'finalizado' && (
+             <div className="flex items-center gap-3 bg-yellow-400 px-4 py-1 rounded-full shadow-sm mb-1 transform -rotate-1">
+                <span className="text-xs font-black text-[#001529]">{match.home_score}</span>
+                <span className="text-[10px] font-black text-[#001529]/40">FINAL</span>
+                <span className="text-xs font-black text-[#001529]">{match.away_score}</span>
+             </div>
           )}
-        </button>
-        {analysis && (
-          <div className="mt-2 w-full animate-in slide-in-from-top-2 duration-300">
-            <div className="bg-gradient-to-r from-slate-50 to-white p-2 sm:p-3 rounded-xl sm:rounded-2xl border border-slate-100 text-[9px] sm:text-[10px] text-slate-600 italic text-center leading-relaxed relative overflow-hidden">
-               <div className="absolute top-0 left-0 w-1 h-full bg-[#CE1126]/20"></div>
-               {analysis}
-            </div>
+
+          <div className={`flex items-center gap-2 p-1.5 rounded-2xl border shadow-inner ${isLocked ? 'bg-slate-100' : 'bg-slate-50'}`}>
+            <input
+              type="number"
+              min="0"
+              max="20"
+              disabled={isLocked}
+              className={`w-10 h-12 sm:w-12 sm:h-14 text-center text-xl sm:text-2xl font-black rounded-xl outline-none shadow-sm text-slate-900 transition-all ${isLocked ? 'bg-slate-200 opacity-80' : 'bg-white focus:ring-4 ring-blue-500/10'}`}
+              value={prediction?.predicted_home_score ?? ''}
+              onChange={(e) => handleScoreChange('home', e.target.value)}
+              placeholder="0"
+            />
+            <span className="font-black text-slate-300">|</span>
+            <input
+              type="number"
+              min="0"
+              max="20"
+              disabled={isLocked}
+              className={`w-10 h-12 sm:w-12 sm:h-14 text-center text-xl sm:text-2xl font-black rounded-xl outline-none shadow-sm text-slate-900 transition-all ${isLocked ? 'bg-slate-200 opacity-80' : 'bg-white focus:ring-4 ring-blue-500/10'}`}
+              value={prediction?.predicted_away_score ?? ''}
+              onChange={(e) => handleScoreChange('away', e.target.value)}
+              placeholder="0"
+            />
           </div>
+          <span className="text-[8px] font-black text-slate-300 uppercase tracking-widest">Tu Pronóstico</span>
+        </div>
+
+        {/* Away Team */}
+        <div className="flex-1 flex flex-col items-center gap-2">
+          <img 
+            src={match.away_team?.fifa_code ? getFlagUrl(match.away_team.fifa_code) : ''} 
+            className={`w-12 h-8 sm:w-14 sm:h-9 object-cover rounded-lg shadow-md border border-slate-50 ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.away_team?.id ? 'opacity-40 grayscale' : ''}`}
+            alt="flag"
+          />
+          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center">
+            {match.away_team?.name || 'TBD'}
+          </div>
+        </div>
+      </div>
+
+      {/* Knockout Tie-breaker Selection */}
+      {isKnockout && isDrawPredicted && !isLocked && (
+        <div className="mt-4 p-3 bg-blue-50 rounded-2xl border border-blue-100 animate-in zoom-in duration-300">
+          <p className="text-[9px] font-black text-blue-600 uppercase text-center mb-3 tracking-widest">¿Quién avanza por penales?</p>
+          <div className="flex justify-center gap-4">
+            <button 
+              onClick={() => handleWinnerSelect(match.home_team!.id)}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${prediction?.predicted_winner_id === match.home_team!.id ? 'bg-blue-600 text-white shadow-lg scale-105' : 'bg-white text-blue-400 border border-blue-200 hover:bg-blue-100'}`}
+            >
+              {match.home_team?.name}
+            </button>
+            <button 
+              onClick={() => handleWinnerSelect(match.away_team!.id)}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${prediction?.predicted_winner_id === match.away_team!.id ? 'bg-blue-600 text-white shadow-lg scale-105' : 'bg-white text-blue-400 border border-blue-200 hover:bg-blue-100'}`}
+            >
+              {match.away_team?.name}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Winner Display for finished knockout matches */}
+      {isKnockout && match.status === 'finalizado' && match.home_score === match.away_score && (
+        <div className="mt-3 text-center">
+          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest italic">Avanzó: </span>
+          <span className="text-[10px] font-black text-green-600 uppercase italic">{match.winner_id === match.home_team?.id ? match.home_team?.name : match.away_team?.name}</span>
+        </div>
+      )}
+
+      <div className="mt-5 pt-3 border-t border-dashed border-slate-100 flex flex-col items-center">
+        {match.status !== 'finalizado' && (
+          <button
+            onClick={fetchAIHelp}
+            disabled={loading || isLocked}
+            className="text-[9px] text-[#002868] font-black flex items-center gap-2 bg-[#002868]/5 px-4 py-2 rounded-full transition-all uppercase tracking-widest hover:bg-[#002868]/10"
+          >
+            {loading ? 'Analizando...' : '✨ VAR (IA)'}
+          </button>
+        )}
+        {analysis && (
+          <p className="mt-3 bg-slate-50 p-3 rounded-xl text-[10px] text-slate-600 italic text-center animate-in fade-in">
+            {analysis}
+          </p>
         )}
       </div>
     </div>

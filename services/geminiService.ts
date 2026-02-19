@@ -14,10 +14,15 @@ export const getMatchAnalysis = async (match: Match): Promise<string> => {
   // Always use a named parameter for the API key and assume it is pre-configured.
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
+  const homeName = match.home_team?.name || 'Local';
+  const homeRanking = match.home_team?.ranking || 'N/A';
+  const awayName = match.away_team?.name || 'Visitante';
+  const awayRanking = match.away_team?.ranking || 'N/A';
+
   const prompt = `
     Analiza el siguiente partido de la Copa del Mundo FIFA 2026:
-    Local: ${match.homeTeam.name} (Ranking FIFA: ${match.homeTeam.ranking})
-    Visitante: ${match.awayTeam.name} (Ranking FIFA: ${match.awayTeam.ranking})
+    Local: ${homeName} (Ranking FIFA: ${homeRanking})
+    Visitante: ${awayName} (Ranking FIFA: ${awayRanking})
     
     Proporciona una predicción concisa (resultado probable) y una razón táctica en una sola frase.
     Responde exclusivamente en español. Mantén un tono deportivo y profesional.

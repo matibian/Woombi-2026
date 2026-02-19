@@ -1,585 +1,683 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { MOCK_GROUPS, TEAMS } from './constants';
-import { UserPrediction, User, PrivateLeague, Match } from './types';
+import { UserPrediction, User, PrivateLeague, Match, Team } from './types';
 import MatchCard from './components/MatchCard';
-import { dbService } from './services/dbService';
+import { api } from './services/apiService';
+import { dbService } from './dbService';
+import { TEAMS } from './constants';
 
-type Tab = 'inicio' | 'eliminatorias' | 'tablas' | 'reglas';
+type Tab = 'inicio' | 'eliminatorias' | 'tablas' | 'reglas' | 'perfil';
+type DataSource = 'local' | 'api';
 
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [loginForm, setLoginForm] = useState({ user: '', pass: '' });
-  const [loginError, setLoginError] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [dataSource, setDataSource] = useState<DataSource>('local');
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '', password_confirmation: '' });
+  const [authError, setAuthError] = useState('');
   
   const [activeTab, setActiveTab] = useState<Tab>('inicio');
-  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [predictions, setPredictions] = useState<Record<number | string, UserPrediction>>({});
+  const [leagues, setLeagues] = useState<PrivateLeague[]>([]);
+  const [globalLeaderboard, setGlobalLeaderboard] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  
   const [teamFilter, setTeamFilter] = useState('');
   const [newLeagueName, setNewLeagueName] = useState('');
-  const [memberEmail, setMemberEmail] = useState<Record<string, string>>({});
-  const [invitationError, setInvitationError] = useState<Record<string, string>>({});
-  const [expandedLeague, setExpandedLeague] = useState<string | null>(null);
+  const [expandedLeague, setExpandedLeague] = useState<number | string | null>(null);
   const [isGlobalRankingExpanded, setIsGlobalRankingExpanded] = useState(false);
-  
-  const [dbUpdateTrigger, setDbUpdateTrigger] = useState(0);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [isNextMatchesExpanded, setIsNextMatchesExpanded] = useState(true);
+  const [isConfirmingLock, setIsConfirmingLock] = useState(false);
 
+  const [profileForm, setProfileForm] = useState({ name: '', password: '' });
+  const [profileSuccess, setProfileSuccess] = useState('');
+
+  const [showNav, setShowNav] = useState(true);
+  const lastScrollY = useRef(0);
   const carouselRef = useRef<HTMLDivElement>(null);
 
+  const [newMemberEmail, setNewMemberEmail] = useState<Record<string, string>>({});
+  const [newMemberError, setNewMemberError] = useState<Record<string, string>>({});
+
   useEffect(() => {
-    dbService.init().then(() => {
-      setDbUpdateTrigger(prev => prev + 1);
-      
-      const savedEmail = localStorage.getItem('prode2026_active_email');
-      if (savedEmail) {
-        const user = dbService.getUser(savedEmail);
-        if (user) {
-          setIsLoggedIn(true);
-          setCurrentUser(user);
-        }
+    const handleScroll = () => {
+      if (window.scrollY > lastScrollY.current && window.scrollY > 100) {
+        setShowNav(false);
+      } else {
+        setShowNav(true);
       }
-    });
+      lastScrollY.current = window.scrollY;
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    const db = dbService.getDb();
-    const user = db.users.find(u => (u.username === loginForm.user || u.email === loginForm.user) && u.password === loginForm.pass);
-    
-    if (user) {
-      setIsLoggedIn(true);
-      setCurrentUser(user);
-      localStorage.setItem('prode2026_active_email', user.email);
-      setLoginError('');
-      setDbUpdateTrigger(prev => prev + 1);
-    } else {
-      setLoginError('Credenciales incorrectas (mati / mati)');
+  useEffect(() => {
+    const initApp = async () => {
+      const savedSource = localStorage.getItem('woombi_source') as DataSource;
+      if (savedSource) setDataSource(savedSource);
+
+      const token = localStorage.getItem('woombi_token');
+      const savedUser = localStorage.getItem('woombi_user');
+      
+      if (savedUser && (savedSource === 'local' || token)) {
+        const parsedUser = JSON.parse(savedUser);
+        setIsLoggedIn(true);
+        setCurrentUser(parsedUser);
+        setProfileForm({ name: parsedUser.name || parsedUser.username || '', password: '' });
+        await fetchInitialData(savedSource || 'local', parsedUser);
+      } else {
+        setLoading(false);
+      }
+    };
+    initApp();
+  }, []);
+
+  const calculatePoints = (realH: number, realA: number, predH: number, predA: number) => {
+    if (realH === predH && realA === predA) return 3;
+    const realDiff = realH - realA;
+    const predDiff = predH - predA;
+    if ((realDiff > 0 && predDiff > 0) || (realDiff < 0 && predDiff < 0) || (realDiff === 0 && predDiff === 0)) {
+      return 1;
     }
+    return 0;
+  };
+
+  const fetchInitialData = async (source: DataSource, userContext?: User) => {
+    setLoading(true);
+    try {
+      if (source === 'local') {
+        await dbService.init();
+        const db = dbService.getDb();
+        const matchesData = await fetch('./db/partidos.json').then(r => r.json());
+        
+        let totalSimulatedPoints = 0;
+        const simulatedPredictions: Record<number | string, UserPrediction> = {};
+        const simulatedPointsHistory: any[] = [];
+
+        const formattedMatches = matchesData.map((m: any, idx: number) => {
+          const homeTeam = TEAMS.find(t => t.id.toString() === m.homeTeamId.toString()) || null;
+          const awayTeam = TEAMS.find(t => t.id.toString() === m.awayTeamId.toString()) || null;
+          const realHome = (idx * 7) % 4;
+          const realAway = (idx * 3) % 3;
+          const predHome = (idx * 5) % 4;
+          const predAway = (idx * 2) % 3;
+          const pts = calculatePoints(realHome, realAway, predHome, predAway);
+          totalSimulatedPoints += pts;
+          simulatedPredictions[m.id] = { match_id: m.id, predicted_home_score: predHome, predicted_away_score: predAway, points: pts };
+          if (pts > 0) {
+            simulatedPointsHistory.push({ id: m.id, date: m.date, detail: `${pts === 3 ? 'Exacto' : 'Tendencia'}: ${homeTeam?.name} vs ${awayTeam?.name}`, points: pts });
+          }
+          return { ...m, status: 'finalizado', stage: 'fase_grupos', home_team: homeTeam, away_team: awayTeam, tournament_group: { id: `g-${m.group}`, name: m.group }, match_date: m.date, home_score: realHome, away_score: realAway };
+        });
+
+        const knockoutMatches: Match[] = [
+          { id: 'ko-1', stage: 'dieciseisavos', status: 'pendiente', match_date: '2026-06-30T15:00:00', home_team: TEAMS.find(t => t.id === 10) || null, away_team: TEAMS.find(t => t.id === 18) || null, home_score: null, away_score: null },
+          { id: 'ko-2', stage: 'dieciseisavos', status: 'pendiente', match_date: '2026-06-30T19:00:00', home_team: TEAMS.find(t => t.id === 1) || null, away_team: TEAMS.find(t => t.id === 6) || null, home_score: null, away_score: null },
+          { id: 'ko-3', stage: 'dieciseisavos', status: 'pendiente', match_date: '2026-07-01T15:00:00', home_team: TEAMS.find(t => t.id === 13) || null, away_team: TEAMS.find(t => t.id === 12) || null, home_score: null, away_score: null },
+          { id: 'ko-4', stage: 'dieciseisavos', status: 'pendiente', match_date: '2026-07-01T19:00:00', home_team: TEAMS.find(t => t.id === 29) || null, away_team: TEAMS.find(t => t.id === 22) || null, home_score: null, away_score: null }
+        ];
+
+        setMatches([...formattedMatches, ...knockoutMatches]);
+        setPredictions(simulatedPredictions);
+        const userEmail = userContext?.email || JSON.parse(localStorage.getItem('woombi_user') || '{}').email;
+        const updatedUser = userContext ? { ...userContext, total_points: totalSimulatedPoints } : { ...currentUser!, total_points: totalSimulatedPoints };
+        setCurrentUser(updatedUser);
+        localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
+        localStorage.setItem('woombi_points_history', JSON.stringify(simulatedPointsHistory));
+        setLeagues(db.privateLeagues.filter(l => l.members?.includes(userEmail)));
+        setGlobalLeaderboard(db.users.sort((a, b) => (b.points || 0) - (a.points || 0)));
+        const groups = Array.from(new Set(formattedMatches.map((m: any) => m.tournament_group?.name))).sort();
+        const initialExpanded: Record<string, boolean> = {};
+        groups.forEach((g, idx) => { initialExpanded[g as string] = idx === 0; });
+        setExpandedGroups(initialExpanded);
+      }
+    } catch (err) { console.error("Error cargando datos:", err); } finally { setLoading(false); }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault(); setAuthError('');
+    localStorage.setItem('woombi_source', dataSource);
+    try {
+      let user: User | null = null;
+      if (dataSource === 'api') {
+        const res = await api.login({ email: authForm.email, password: authForm.password });
+        localStorage.setItem('woombi_token', res.token);
+        localStorage.setItem('woombi_user', JSON.stringify(res.user));
+        user = res.user;
+      } else {
+        await dbService.init();
+        const dbUser = dbService.getUser(authForm.email);
+        if (dbUser && (dbUser as any).password === authForm.password) {
+          user = { ...dbUser, name: (dbUser as any).username } as unknown as User;
+          localStorage.setItem('woombi_user', JSON.stringify(user));
+        } else { throw new Error('Usuario no encontrado'); }
+      }
+      if (user) { setCurrentUser(user); setProfileForm({ name: user.name || '', password: '' }); setIsLoggedIn(true); fetchInitialData(dataSource, user); }
+    } catch (err) { setAuthError('Error de acceso. Verifica tus credenciales.'); }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault(); setAuthError('');
+    localStorage.setItem('woombi_source', dataSource);
+    if (dataSource === 'api') {
+      const res = await api.register(authForm);
+      if (res.errors) { setAuthError(Object.values(res.errors).flat()[0] as string); }
+      else if (res.token) {
+        localStorage.setItem('woombi_token', res.token);
+        localStorage.setItem('woombi_user', JSON.stringify(res.user));
+        setCurrentUser(res.user); setIsLoggedIn(true); fetchInitialData(dataSource, res.user);
+      }
+    } else { setAuthError('Registro local no disponible. Usa mati@woombi.com / mati'); }
   };
 
   const handleLogout = () => {
-    setIsLoggedIn(false);
-    setCurrentUser(null);
-    localStorage.removeItem('prode2026_active_email');
+    if (dataSource === 'api') api.logout();
+    localStorage.removeItem('woombi_token');
+    localStorage.removeItem('woombi_user');
+    localStorage.removeItem('woombi_source');
+    localStorage.removeItem('woombi_points_history');
+    setIsLoggedIn(false); setCurrentUser(null);
   };
 
-  const handlePredictionUpdate = (pred: UserPrediction) => {
-    if (!currentUser) return;
-    
-    // VALIDACIÓN: No permitir números negativos y asegurar valores enteros
-    const sanitizedPred: UserPrediction = {
-      matchId: pred.matchId,
-      homeScore: Math.max(0, Math.floor(pred.homeScore)),
-      awayScore: Math.max(0, Math.floor(pred.awayScore))
-    };
+  const handlePredictionUpdate = async (pred: UserPrediction) => {
+    setPredictions(prev => ({ ...prev, [pred.match_id]: pred }));
+    if (dataSource === 'api') {
+      try { await api.updatePrediction(pred.match_id as any, pred.predicted_home_score!, pred.predicted_away_score!); } catch (err) { console.error("API update error"); }
+    } else if (currentUser) {
+      const db = dbService.getDb();
+      const dbUser = db.users.find((u: any) => u.email === currentUser.email);
+      if (dbUser) { dbUser.predictions = { ...dbUser.predictions, [pred.match_id]: pred }; dbService.saveDb(db); }
+    }
+  };
 
-    // ESTRUCTURA: Guardar en el diccionario 'predictions' usando matchId como clave
-    const newPredictions = { 
-      ...currentUser.predictions, 
-      [sanitizedPred.matchId]: sanitizedPred 
-    };
-
-    // Actualizar puntos mock (en un prode real esto vendría de los resultados oficiales)
-    const updatedUser: User = { 
-      ...currentUser, 
-      predictions: newPredictions,
-      points: Object.keys(newPredictions).length * 3 
-    };
-
+  const handleChampionUpdate = (teamId: string) => {
+    if (!currentUser || currentUser.champion_locked) return;
+    setIsConfirmingLock(false);
+    const updatedUser = { ...currentUser, champion_id: teamId };
     setCurrentUser(updatedUser);
-    // PERSISTENCIA: Guardar en la base de datos (localStorage)
-    dbService.updateUser(updatedUser);
-    setDbUpdateTrigger(prev => prev + 1);
+    localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
+    if (dataSource === 'local') {
+      const db = dbService.getDb();
+      const dbUser = db.users.find((u: any) => u.email === currentUser.email);
+      if (dbUser) { dbUser.championId = teamId; dbService.saveDb(db); }
+    }
   };
 
-  const handleChampionSelect = (id: string) => {
-    if (!currentUser) return;
-    const updatedUser = { ...currentUser, championId: id };
-    setCurrentUser(updatedUser);
-    dbService.updateUser(updatedUser);
-    setDbUpdateTrigger(prev => prev + 1);
-  };
-
-  const handleCreateLeague = () => {
-    if (!currentUser || !newLeagueName.trim()) return;
-    dbService.createLeague(newLeagueName, currentUser.email);
-    setNewLeagueName('');
-    setDbUpdateTrigger(prev => prev + 1);
-  };
-
-  const handleAddMember = (leagueId: string) => {
-    const email = memberEmail[leagueId];
-    if (!email) return;
+  const handleLockChampion = () => {
+    if (!currentUser || !currentUser.champion_id || currentUser.champion_locked) return;
     
-    const userExists = dbService.getUser(email);
-    if (!userExists) {
-      setInvitationError({ ...invitationError, [leagueId]: "No existe el jugador" });
+    if (!isConfirmingLock) {
+      setIsConfirmingLock(true);
       return;
     }
 
-    dbService.addMemberToLeague(leagueId, email);
-    setMemberEmail({ ...memberEmail, [leagueId]: '' });
-    setInvitationError({ ...invitationError, [leagueId]: '' });
-    setDbUpdateTrigger(prev => prev + 1);
+    const updatedUser = { ...currentUser, champion_locked: true };
+    setCurrentUser(updatedUser);
+    localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
+    
+    if (dataSource === 'local') {
+      const db = dbService.getDb();
+      const dbUser = db.users.find((u: any) => u.email === currentUser.email);
+      if (dbUser) {
+        dbUser.champion_locked = true;
+        dbService.saveDb(db);
+      }
+    }
+    setIsConfirmingLock(false);
   };
 
-  const handleRemoveMember = (leagueId: string, email: string) => {
-    dbService.removeMemberFromLeague(leagueId, email);
-    setDbUpdateTrigger(prev => prev + 1);
+  const handleUpdateProfile = (e: React.FormEvent) => {
+    e.preventDefault(); if (!currentUser) return;
+    const updatedUser = { ...currentUser, name: profileForm.name };
+    setCurrentUser(updatedUser);
+    localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
+    if (dataSource === 'local') {
+      const db = dbService.getDb();
+      const dbUser = db.users.find((u: any) => u.email === currentUser.email);
+      if (dbUser) { dbUser.username = profileForm.name; if (profileForm.password) dbUser.password = profileForm.password; dbService.saveDb(db); }
+    }
+    setProfileSuccess('¡Perfil actualizado con éxito!');
+    setTimeout(() => setProfileSuccess(''), 3000);
   };
 
-  const allMatches = useMemo(() => MOCK_GROUPS.flatMap(g => g.matches), []);
-  const totalMatchesCount = allMatches.length;
-  const predictionsCount = currentUser ? Object.keys(currentUser.predictions).length : 0;
+  const handleCreateLeague = async () => {
+    if (!newLeagueName.trim()) return;
+    if (dataSource === 'api') {
+      const newLeague = await api.createGroup(newLeagueName);
+      setLeagues(prev => [...prev, newLeague]);
+    } else if (currentUser) {
+      const newL = dbService.createLeague(newLeagueName, currentUser.email);
+      setLeagues(prev => [...prev, newL]);
+    }
+    setNewLeagueName('');
+  };
 
-  const nextMatches = useMemo(() => {
-    return allMatches.slice(0, 10);
-  }, [allMatches]);
-
-  const scrollCarousel = (direction: 'left' | 'right') => {
-    if (carouselRef.current) {
-      const scrollAmount = 300;
-      carouselRef.current.scrollBy({ left: direction === 'left' ? -scrollAmount : scrollAmount, behavior: 'smooth' });
+  const handleAddMember = async (leagueId: string | number) => {
+    const email = newMemberEmail[leagueId]?.trim(); if (!email) return;
+    if (dataSource === 'local') {
+      const db = dbService.getDb();
+      if (!db.users.some(u => u.email.toLowerCase() === email.toLowerCase())) {
+        setNewMemberError(prev => ({ ...prev, [leagueId]: "No existe el jugador" })); return;
+      }
+      dbService.addMemberToLeague(leagueId.toString(), email);
+      setNewMemberEmail(prev => ({ ...prev, [leagueId]: "" })); setNewMemberError(prev => ({ ...prev, [leagueId]: "" }));
+      setLeagues(dbService.getDb().privateLeagues.filter(l => l.members?.includes(currentUser?.email || "")));
     }
   };
 
+  const handleRemoveMember = (leagueId: string | number, email: string) => {
+    if (!window.confirm(`¿Estás seguro de eliminar a ${email}?`)) return;
+    if (dataSource === 'local') {
+      dbService.removeMemberFromLeague(leagueId.toString(), email);
+      setLeagues(dbService.getDb().privateLeagues.filter(l => l.members?.includes(currentUser?.email || "")));
+    }
+  };
+
+  const toggleGroup = (groupName: string) => {
+    setExpandedGroups(prev => ({ ...prev, [groupName]: !prev[groupName] }));
+  };
+
   const filteredMatches = useMemo(() => {
-    if (!teamFilter.trim()) return [];
-    return allMatches.filter(m => 
-      m.homeTeam.name.toLowerCase().includes(teamFilter.toLowerCase()) || 
-      m.awayTeam.name.toLowerCase().includes(teamFilter.toLowerCase())
-    );
-  }, [teamFilter, allMatches]);
+    if (!teamFilter) return [];
+    return matches.filter(m => (m.home_team?.name || '').toLowerCase().includes(teamFilter.toLowerCase()) || (m.away_team?.name || '').toLowerCase().includes(teamFilter.toLowerCase()));
+  }, [teamFilter, matches]);
 
-  const myLeagues = useMemo(() => {
-    if (!currentUser) return [];
-    const db = dbService.getDb();
-    return db.privateLeagues.filter(l => l.members.includes(currentUser.email));
-  }, [currentUser, dbUpdateTrigger]);
+  const matchesByGroup = useMemo(() => {
+    const groups: Record<string, Match[]> = {};
+    matches.filter(m => m.stage === 'fase_grupos').forEach(m => {
+      const gName = m.tournament_group?.name || 'A';
+      if (!groups[gName]) groups[gName] = [];
+      groups[gName].push(m);
+    });
+    return Object.fromEntries(Object.entries(groups).sort());
+  }, [matches]);
 
-  const globalRanking = useMemo(() => {
-    return dbService.getDb().users.sort((a, b) => b.points - a.points);
-  }, [dbUpdateTrigger]);
+  const matchesEliminatorias = useMemo(() => matches.filter(m => m.stage !== 'fase_grupos'), [matches]);
 
-  const getFlagUrl = (code: string) => `https://flagcdn.com/w80/${code.toLowerCase()}.png`;
-  
+  const nextSixMatches = useMemo(() => [...matches].filter(m => m.status === 'pendiente').sort((a, b) => new Date(a.match_date).getTime() - new Date(b.match_date).getTime()).slice(0, 6), [matches]);
+
+  const currentPointsHistory = useMemo(() => {
+    const saved = localStorage.getItem('woombi_points_history');
+    return saved ? JSON.parse(saved) : [];
+  }, [currentUser]);
+
+  const scrollCarousel = (direction: 'left' | 'right') => {
+    if (carouselRef.current) { carouselRef.current.scrollBy({ left: direction === 'left' ? -350 : 350, behavior: 'smooth' }); }
+  };
+
   const LOGO_2026 = "https://paladarnegro.net/escudoteca/copas/copamundial/png/mundial_2026.png";
 
-  if (!isLoggedIn || !currentUser) {
-    return (
-      <div className="min-h-screen bg-[#001529] flex items-center justify-center p-4 relative overflow-hidden">
-        <div className="w-full max-w-md bg-white/5 backdrop-blur-xl p-6 sm:p-10 rounded-3xl sm:rounded-[3rem] border border-white/10 shadow-2xl relative z-10">
-          <div className="text-center mb-8 sm:mb-10">
-            <img src={LOGO_2026} alt="WC 2026" className="w-20 sm:w-32 mx-auto mb-6 invert brightness-200" />
-            <h1 className="text-4xl sm:text-6xl marker-font text-yellow-400 mb-2">WOOMBI</h1>
-            <p className="text-white font-black uppercase tracking-[0.4em] text-[8px] sm:text-[10px] opacity-70">Prode Mundial 2026</p>
-          </div>
-          <form onSubmit={handleLogin} className="space-y-4 sm:space-y-5">
-            <input 
-              type="text" 
-              className="w-full bg-white/10 border border-white/20 rounded-xl sm:rounded-2xl px-5 sm:px-6 py-3 sm:py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm sm:text-base"
-              placeholder="USUARIO O EMAIL"
-              value={loginForm.user}
-              onChange={(e) => setLoginForm({...loginForm, user: e.target.value})}
-            />
-            <input 
-              type="password" 
-              className="w-full bg-white/10 border border-white/20 rounded-xl sm:rounded-2xl px-5 sm:px-6 py-3 sm:py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm sm:text-base"
-              placeholder="CONTRASEÑA"
-              value={loginForm.pass}
-              onChange={(e) => setLoginForm({...loginForm, pass: e.target.value})}
-            />
-            {loginError && <p className="text-red-400 text-xs font-black text-center">{loginError}</p>}
-            <button type="submit" className="w-full bg-yellow-400 text-[#001529] font-black py-4 sm:py-5 rounded-xl sm:rounded-2xl uppercase text-xs sm:text-sm shadow-xl hover:bg-yellow-300 transition-all active:scale-95">
-              Ingresar al Estadio
-            </button>
-          </form>
-          <p className="mt-8 text-center text-white/30 text-[8px] sm:text-[9px] font-black uppercase tracking-widest">mati@woombi.com / mati</p>
-        </div>
-      </div>
-    );
-  }
+  if (loading) return (
+    <div className="min-h-screen bg-[#001529] flex items-center justify-center">
+      <img src={LOGO_2026} className="h-40 animate-pulse invert" alt="loading" />
+    </div>
+  );
 
-  // Bonus de campeón: 20 puntos
-  const totalPoints = currentUser.points + (currentUser.championId ? 20 : 0);
+  if (!isLoggedIn || !currentUser) return (
+    <div className="min-h-screen bg-[#001529] flex items-center justify-center p-4 relative overflow-hidden">
+      <div className="w-full max-w-md bg-white/5 backdrop-blur-xl p-8 sm:p-10 rounded-[3rem] border border-white/10 shadow-2xl relative z-10">
+        <div className="text-center mb-10">
+          <img src={LOGO_2026} alt="WC 2026" className="w-20 mx-auto mb-6 invert brightness-200" />
+          <h1 className="text-5xl marker-font text-yellow-400 mb-2">WOOMBI</h1>
+          <p className="text-white font-black uppercase tracking-[0.4em] text-[10px] opacity-70">Prode Mundial 2026</p>
+        </div>
+        <div className="flex bg-white/10 p-1 rounded-2xl mb-8">
+          <button onClick={() => setDataSource('local')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${dataSource === 'local' ? 'bg-yellow-400 text-[#001529] shadow-lg' : 'text-white/40 hover:text-white'}`}>Mística Local</button>
+          <button onClick={() => setDataSource('api')} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${dataSource === 'api' ? 'bg-[#002868] text-white shadow-lg' : 'text-white/40 hover:text-white'}`}>Estadio Online</button>
+        </div>
+        <form onSubmit={isRegistering ? handleRegister : handleLogin} className="space-y-4">
+          {isRegistering && ( <input type="text" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="NOMBRE COMPLETO" value={authForm.name} onChange={(e) => setAuthForm({...authForm, name: e.target.value})} /> )}
+          <input type="email" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="EMAIL" value={authForm.email} onChange={(e) => setAuthForm({...authForm, email: e.target.value})} />
+          <input type="password" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="CONTRASEÑA" value={authForm.password} onChange={(e) => setAuthForm({...authForm, password: e.target.value})} />
+          {authError && <p className="text-red-400 text-[10px] font-black text-center uppercase tracking-widest leading-tight">{authError}</p>}
+          <button type="submit" className={`w-full font-black py-4 rounded-xl uppercase text-xs shadow-xl transition-all active:scale-95 ${dataSource === 'api' ? 'bg-[#002868] text-white hover:bg-[#001529]' : 'bg-yellow-400 text-[#001529] hover:bg-yellow-300'}`}>{isRegistering ? 'Crear Cuenta' : 'Ingresar al Estadio'}</button>
+          <div className="text-center mt-4"> <button type="button" onClick={() => { setIsRegistering(!isRegistering); setAuthError(''); }} className="text-white/40 text-[9px] font-black uppercase tracking-widest hover:text-white transition-colors underline underline-offset-4">{isRegistering ? '¿Ya tienes cuenta? Login' : '¿Eres nuevo? Regístrate'}</button> </div>
+        </form>
+      </div>
+    </div>
+  );
+
+  const selectedChampionTeam = TEAMS.find(t => t.id.toString() === currentUser.champion_id?.toString());
 
   return (
     <div className="min-h-screen pb-24 sm:pb-32 bg-[#F0F2F5]">
-      <nav className="bg-[#001529] text-white shadow-2xl sticky top-0 z-50 border-b-2 sm:border-b-4 border-yellow-400">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-2 sm:py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-5 cursor-pointer group" onClick={() => setActiveTab('inicio')}>
-            <div className="relative transform group-hover:scale-110 transition-transform">
-                <img src={LOGO_2026} alt="2026" className="h-10 sm:h-20 invert brightness-200" />
-                <div className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
-            </div>
+      <nav className="bg-[#001529] text-white shadow-2xl sticky top-0 z-50 overflow-hidden">
+        <div className="h-2 w-full flex">
+          <div className="h-full w-1/3 bg-[#D80621] shadow-[0_0_15px_rgba(216,6,33,0.5)]"></div>
+          <div className="h-full w-1/3 bg-[#006847] shadow-[0_0_15px_rgba(0,104,71,0.5)]"></div>
+          <div className="h-full w-1/3 bg-[#002868] shadow-[0_0_15px_rgba(0,40,104,0.5)]"></div>
+        </div>
+        <div className="max-w-6xl mx-auto px-4 sm:px-8 py-3 sm:py-5 flex items-center justify-between relative">
+          <div className="flex items-center gap-3 sm:gap-6 cursor-pointer group" onClick={() => setActiveTab('inicio')}>
+            <div className="relative"> <img src={LOGO_2026} alt="2026" className="h-12 sm:h-20 invert brightness-200 transform group-hover:scale-110 transition-transform relative z-10" /> <div className="absolute inset-0 bg-yellow-400/20 blur-2xl rounded-full scale-150 group-hover:bg-yellow-400/30 transition-all"></div> </div>
             <div className="flex flex-col">
-                <span className="text-xl sm:text-4xl marker-font text-yellow-400 leading-none">WOOMBI</span>
-                <span className="text-[8px] sm:text-[11px] font-black uppercase tracking-[0.2em] sm:tracking-[0.4em] opacity-40">Mundial 2026</span>
+              <div className="flex items-center gap-3"> <span className="text-2xl sm:text-5xl marker-font text-yellow-400 leading-none drop-shadow-[0_2px_4px_rgba(0,0,0,0.5)]">WOOMBI</span> <span className={`text-[9px] font-black px-2 py-0.5 rounded-full shadow-lg ${dataSource === 'api' ? 'bg-[#002868] text-white' : 'bg-yellow-400 text-[#001529]'}`}>{dataSource.toUpperCase()}</span> </div>
+              <div className="flex items-center gap-2 mt-1"> <span className="text-[10px] sm:text-[13px] font-black uppercase tracking-[0.3em] opacity-40">PRODE NORTEAMERICA 2026</span> <div className="flex gap-1 opacity-60"><span className="w-1.5 h-1.5 rounded-full bg-[#D80621]"></span><span className="w-1.5 h-1.5 rounded-full bg-[#006847]"></span><span className="w-1.5 h-1.5 rounded-full bg-[#002868]"></span></div> </div>
             </div>
           </div>
-          <div className="flex items-center gap-3 sm:gap-8">
-            <div className="text-right hidden sm:block border-r border-white/10 pr-6">
-              <div className="text-[10px] text-yellow-400 font-black uppercase italic tracking-wider">{currentUser.username}</div>
-              <button onClick={handleLogout} className="text-[9px] font-black text-red-400 uppercase hover:text-red-300 transition-colors">Abandonar</button>
+          <div className="flex items-center gap-4">
+            <div className="bg-gradient-to-br from-[#001529] to-[#002868] px-4 sm:px-8 py-2.5 rounded-[1.5rem] flex flex-col items-center shadow-lg border border-white/10 ring-2 ring-yellow-400/50">
+              <span className="text-[8px] sm:text-[10px] text-yellow-400/70 font-black uppercase tracking-[0.2em]">MIS PUNTOS</span>
+              <span className="text-2xl sm:text-4xl font-black text-white leading-none tracking-tighter italic">{currentUser.total_points || 0}</span>
             </div>
-            <div className="bg-gradient-to-br from-yellow-400 to-yellow-600 px-3 sm:px-6 py-1.5 sm:py-3 rounded-lg sm:rounded-2xl flex flex-col items-center shadow-xl border border-yellow-200/20 transform hover:scale-105 transition-transform">
-              <span className="text-[7px] sm:text-[10px] text-[#001529] font-black uppercase tracking-tighter">MIS PUNTOS</span>
-              <span className="text-xl sm:text-3xl font-black text-[#001529] leading-none">{totalPoints}</span>
-            </div>
+            {/* Botón Cerrar Sesión en Header (Desktop) */}
+            <button 
+              onClick={handleLogout}
+              className="hidden md:flex items-center justify-center w-12 h-12 bg-white/5 hover:bg-red-500/20 text-white/40 hover:text-red-400 rounded-2xl border border-white/10 transition-all"
+              title="Cerrar Sesión"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+            </button>
           </div>
         </div>
       </nav>
 
-      <main className="max-w-4xl mx-auto px-4 pt-6 sm:pt-10">
+      <main className="max-w-5xl mx-auto px-4 pt-8 sm:pt-12">
         {activeTab === 'inicio' && (
-          <div className="space-y-6 sm:space-y-10">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-8">
-              <div className="bg-white p-4 sm:p-8 rounded-2xl sm:rounded-[2.5rem] shadow-lg border-2 border-slate-100 flex items-center gap-4 sm:gap-6 group hover:border-[#002868]/30 transition-all">
-                 <div className="bg-[#001529] w-10 h-10 sm:w-16 sm:h-16 flex items-center justify-center rounded-xl sm:rounded-3xl text-xl sm:text-3xl shadow-xl transform group-hover:rotate-12 transition-transform">
-                    📋
-                 </div>
-                 <div>
-                    <h3 className="font-black text-[8px] sm:text-[10px] uppercase text-slate-400 tracking-[0.2em] mb-0.5 sm:mb-1">MIS PRONÓSTICOS</h3>
-                    <p className="text-xl sm:text-3xl font-black text-slate-800 tracking-tight">
-                        {predictionsCount} <span className="text-slate-300 text-xs sm:text-base">/ {totalMatchesCount}</span>
-                    </p>
-                 </div>
-              </div>
-
-              <div className="md:col-span-2 bg-gradient-to-r from-[#001529] to-[#002868] p-4 sm:p-8 rounded-2xl sm:rounded-[2.5rem] shadow-2xl text-white flex items-center justify-between border-r-4 sm:border-r-8 border-yellow-400 relative overflow-hidden group">
-                <div className="absolute top-0 right-0 w-24 sm:w-32 h-24 sm:h-32 bg-yellow-400/5 rounded-full -mr-6 sm:-mr-10 -mt-6 sm:-mt-10 group-hover:scale-110 transition-transform"></div>
-                <div className="flex-1 relative z-10">
-                   <h3 className="font-black text-[8px] sm:text-[10px] uppercase text-yellow-400 tracking-[0.2em] mb-1 sm:mb-2">TU CANDIDATO A LA COPA 🏆</h3>
-                   <select 
-                     value={currentUser.championId || ""} 
-                     onChange={(e) => handleChampionSelect(e.target.value)}
-                     className="w-full bg-white/10 border-none text-base sm:text-2xl font-black italic p-1 sm:p-2 outline-none appearance-none cursor-pointer hover:bg-white/20 rounded-xl sm:rounded-2xl transition-all text-white font-black"
-                   >
-                     <option value="" className="text-slate-900 font-bold">Elegir Campeón...</option>
-                     {TEAMS.map(team => <option key={team.id} value={team.id} className="text-slate-900 font-bold">{team.name}</option>)}
-                   </select>
-                </div>
-                <img src={LOGO_2026} className="h-12 sm:h-20 invert opacity-20 ml-3 sm:ml-6 relative z-10" alt="wc" />
-              </div>
-            </div>
-
-            <div className="bg-white rounded-2xl sm:rounded-[3rem] shadow-xl p-4 sm:p-10 overflow-hidden relative border border-slate-100">
-              <div className="flex items-center justify-between mb-4 sm:mb-8">
-                 <h2 className="text-lg sm:text-2xl font-black uppercase italic tracking-tighter text-[#001529]">🔥 Próximos Duelos</h2>
-                 <div className="flex items-center gap-2">
-                    <button onClick={() => scrollCarousel('left')} className="p-2 sm:p-3 rounded-full bg-slate-100 hover:bg-[#001529] hover:text-white transition-all shadow-sm">
-                        <svg className="w-4 h-4 sm:w-6 sm:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M15 19l-7-7 7-7" /></svg>
-                    </button>
-                    <button onClick={() => scrollCarousel('right')} className="p-2 sm:p-3 rounded-full bg-slate-100 hover:bg-[#001529] hover:text-white transition-all shadow-sm">
-                        <svg className="w-4 h-4 sm:w-6 sm:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 5l7 7-7 7" /></svg>
-                    </button>
-                 </div>
-              </div>
-              <div ref={carouselRef} className="flex overflow-x-auto gap-4 sm:gap-6 pb-4 sm:pb-6 no-scrollbar scroll-smooth">
-                {nextMatches.map(m => (
-                  <div key={m.id} className="min-w-[280px] sm:min-w-[340px] bg-slate-50 border-2 border-transparent hover:border-yellow-400/50 rounded-2xl sm:rounded-[2.5rem] p-5 sm:p-7 transition-all shadow-sm group">
-                    <div className="flex items-center justify-between mb-4 sm:mb-6 text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                      <span className="bg-white/80 px-2 py-1 rounded-lg border border-slate-100 shadow-sm">GRUPO {m.group}</span>
-                      <span className="bg-[#001529] text-white px-2 py-1 rounded-lg shadow-md font-mono">
-                        {new Date(m.date).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                    
-                    <div className="flex items-center gap-2 justify-between mb-5 sm:mb-7">
-                       <div className="flex-1 flex flex-col items-center gap-2">
-                          <img src={getFlagUrl(m.homeTeam.code)} className="w-10 h-6 sm:w-16 sm:h-10 object-cover rounded shadow-md border-2 border-white" />
-                          <span className="text-[10px] sm:text-[12px] font-black truncate w-full text-center italic leading-tight text-slate-800">{m.homeTeam.name}</span>
-                       </div>
-                       
-                       <div className="flex items-center gap-1.5 sm:gap-3 bg-white p-1.5 sm:p-2.5 rounded-xl sm:rounded-3xl shadow-inner border border-slate-100">
-                          <input 
-                            type="number" className="w-10 h-10 sm:w-14 sm:h-14 text-center font-black bg-slate-50 rounded-lg sm:rounded-2xl text-lg sm:text-2xl shadow-sm border-2 border-transparent focus:border-[#002868] outline-none text-slate-900 font-black" 
-                            placeholder="0"
-                            min="0"
-                            value={currentUser.predictions[m.id]?.homeScore ?? ''}
-                            onChange={(e) => handlePredictionUpdate({ 
-                              matchId: m.id, 
-                              homeScore: Math.max(0, parseInt(e.target.value) || 0), 
-                              awayScore: currentUser.predictions[m.id]?.awayScore || 0 
-                            })}
-                          />
-                          <span className="font-black text-slate-300 text-lg sm:text-2xl">-</span>
-                          <input 
-                            type="number" className="w-10 h-10 sm:w-14 sm:h-14 text-center font-black bg-slate-50 rounded-lg sm:rounded-2xl text-lg sm:text-2xl shadow-sm border-2 border-transparent focus:border-[#002868] outline-none text-slate-900 font-black" 
-                            placeholder="0"
-                            min="0"
-                            value={currentUser.predictions[m.id]?.awayScore ?? ''}
-                            onChange={(e) => handlePredictionUpdate({ 
-                              matchId: m.id, 
-                              homeScore: currentUser.predictions[m.id]?.homeScore || 0, 
-                              awayScore: Math.max(0, parseInt(e.target.value) || 0) 
-                            })}
-                          />
-                       </div>
-                       
-                       <div className="flex-1 flex flex-col items-center gap-2">
-                          <img src={getFlagUrl(m.awayTeam.code)} className="w-10 h-6 sm:w-16 sm:h-10 object-cover rounded shadow-md border-2 border-white" />
-                          <span className="text-[10px] sm:text-[12px] font-black truncate w-full text-center italic leading-tight text-slate-800">{m.awayTeam.name}</span>
-                       </div>
-                    </div>
-                    
-                    {currentUser.predictions[m.id] ? (
-                        <div className="text-[8px] sm:text-[10px] font-black text-green-600 text-center uppercase tracking-[0.2em] flex items-center justify-center gap-2 bg-green-50 py-2 sm:py-3 rounded-xl border border-green-100">
-                           <span className="text-sm">✔</span> PRONÓSTICO LISTO
+          <div className="space-y-8 sm:space-y-12">
+            
+            {/* Widget Mi Candidato al Título */}
+            {!currentUser.champion_locked ? (
+              <div className="bg-gradient-to-r from-[#001529] to-[#002868] p-8 sm:p-10 rounded-[3rem] shadow-2xl text-white border-b-8 border-yellow-400 relative overflow-hidden transition-all duration-700">
+                <div className="relative z-10 flex flex-col sm:flex-row items-center justify-between gap-8">
+                  <div className="text-center sm:text-left w-full sm:w-2/3">
+                    <h3 className="font-black text-[10px] sm:text-[12px] uppercase text-yellow-400 tracking-[0.3em] mb-2 italic">MI CANDIDATO AL TÍTULO</h3>
+                    <div className="flex flex-col gap-4">
+                      <p className="text-2xl sm:text-4xl font-black italic tracking-tighter">¿Quién levanta la Copa?</p>
+                      
+                      {!isConfirmingLock ? (
+                        <div className="flex flex-col sm:flex-row gap-4">
+                          <select 
+                            value={currentUser.champion_id || ''} 
+                            onChange={(e) => handleChampionUpdate(e.target.value)} 
+                            className="flex-1 bg-white/10 border-2 border-white/20 rounded-2xl px-6 py-4 font-black text-white outline-none focus:border-yellow-400 transition-colors text-lg"
+                          >
+                            <option value="" className="text-black">Seleccionar Campeón...</option>
+                            {TEAMS.map(team => <option key={team.id} value={team.id} className="text-black">{team.name}</option>)}
+                          </select>
+                          {currentUser.champion_id && (
+                            <button 
+                              onClick={handleLockChampion}
+                              className="bg-yellow-400 text-[#001529] px-8 py-4 rounded-2xl font-black uppercase text-sm shadow-xl hover:bg-yellow-300 active:scale-95 transition-all flex items-center justify-center gap-2"
+                            >
+                              <span>🔒</span> BLOQUEAR
+                            </button>
+                          )}
                         </div>
-                    ) : (
-                        <div className="text-[8px] sm:text-[10px] font-black text-slate-300 text-center uppercase tracking-[0.2em] py-2 sm:py-3 bg-slate-100/50 rounded-xl">PENDIENTE DE CARGA</div>
-                    )}
+                      ) : (
+                        <div className="bg-yellow-400/10 border-2 border-dashed border-yellow-400/50 p-6 rounded-[2rem] animate-in zoom-in duration-300">
+                          <p className="text-yellow-400 font-black uppercase text-[11px] mb-4 tracking-widest flex items-center gap-2">
+                             <span>⚠️</span> ATENCIÓN: RECOMPENSA POR RIESGO
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                            <div className="bg-yellow-400 text-[#001529] p-3 rounded-xl text-center shadow-lg">
+                              <span className="block text-[8px] font-black uppercase">AHORA</span>
+                              <span className="text-2xl font-black">50 <span className="text-xs">PTS</span></span>
+                            </div>
+                            <div className="bg-white/5 border border-white/10 p-3 rounded-xl text-center opacity-60">
+                              <span className="block text-[8px] font-black uppercase">16AVOs</span>
+                              <span className="text-2xl font-black">30 <span className="text-xs">PTS</span></span>
+                            </div>
+                            <div className="bg-white/5 border border-white/10 p-3 rounded-xl text-center opacity-40">
+                              <span className="block text-[8px] font-black uppercase">CUARTOS</span>
+                              <span className="text-2xl font-black">10 <span className="text-xs">PTS</span></span>
+                            </div>
+                          </div>
+                          <div className="flex gap-4">
+                            <button 
+                              onClick={handleLockChampion}
+                              className="flex-1 bg-yellow-400 text-[#001529] py-4 rounded-xl font-black uppercase text-xs shadow-2xl hover:bg-yellow-300 transition-all"
+                            >
+                              CONFIRMAR DEFINITIVO
+                            </button>
+                            <button 
+                              onClick={() => setIsConfirmingLock(false)}
+                              className="px-6 py-4 rounded-xl font-black uppercase text-xs text-white/60 hover:text-white transition-all"
+                            >
+                              CANCELAR
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                ))}
+                  <div className="flex items-center gap-6 relative z-10">
+                     {selectedChampionTeam && <img src={`https://flagcdn.com/w160/${selectedChampionTeam.fifa_code.toLowerCase()}.png`} className="w-24 h-16 object-cover rounded-xl shadow-2xl border-2 border-white/20 transform rotate-3" alt="flag" />}
+                     <img src={LOGO_2026} className="h-24 invert opacity-20 transform -rotate-12" alt="wc" />
+                  </div>
+                </div>
               </div>
+            ) : (
+              /* El "Globo" o Badge Final */
+              <div className="flex justify-center animate-in slide-in-from-top-12 duration-1000">
+                <div className="relative group">
+                  <div className="absolute inset-0 bg-yellow-400/20 blur-3xl rounded-full scale-150 animate-pulse"></div>
+                  <div className="relative bg-white/90 backdrop-blur-xl border-4 border-yellow-400 px-10 py-5 rounded-full shadow-[0_20px_50px_rgba(234,179,8,0.3)] flex items-center gap-6 transition-transform hover:scale-105">
+                    <div className="w-16 h-12 relative">
+                      <img 
+                        src={`https://flagcdn.com/w160/${selectedChampionTeam?.fifa_code.toLowerCase()}.png`} 
+                        className="w-full h-full object-cover rounded-lg shadow-md border-2 border-white"
+                        alt="flag"
+                      />
+                      <span className="absolute -top-3 -right-3 bg-[#001529] text-yellow-400 w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-black shadow-lg">50</span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.4em] italic leading-none mb-1">Candidato al Título</span>
+                      <span className="text-2xl font-black text-[#001529] uppercase italic tracking-tighter leading-none">{selectedChampionTeam?.name}</span>
+                    </div>
+                    <div className="h-10 w-px bg-slate-200 ml-2"></div>
+                    <span className="text-2xl">🏆</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Widget: Próximos Partidos (Knockout) Desplegable */}
+            <div className="bg-white rounded-[3rem] shadow-xl border border-slate-200 overflow-hidden transition-all">
+              <div 
+                onClick={() => setIsNextMatchesExpanded(!isNextMatchesExpanded)}
+                className="p-8 flex items-center justify-between bg-slate-50 border-b border-slate-100 cursor-pointer hover:bg-slate-100 transition-colors"
+              >
+                <div className="flex items-center gap-6">
+                  <div className="bg-[#002868] text-white w-12 h-12 flex items-center justify-center rounded-2xl text-xl shadow-lg">⚡</div>
+                  <div>
+                    <h3 className="font-black uppercase italic text-2xl tracking-tighter text-[#001529]">Próximos Partidos (Eliminatorias)</h3>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{nextSixMatches.length} partidos por jugar</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="hidden sm:flex gap-2 mr-4">
+                    <button onClick={(e) => { e.stopPropagation(); scrollCarousel('left'); }} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl shadow-sm hover:bg-slate-100 text-[#002868]">◀</button>
+                    <button onClick={(e) => { e.stopPropagation(); scrollCarousel('right'); }} className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 rounded-xl shadow-sm hover:bg-slate-100 text-[#002868]">▶</button>
+                  </div>
+                  <span className={`text-3xl transition-transform duration-500 ${isNextMatchesExpanded ? 'rotate-180 text-yellow-500' : 'text-slate-300'}`}>▼</span>
+                </div>
+              </div>
+              {isNextMatchesExpanded && (
+                <div ref={carouselRef} className="p-8 flex overflow-x-auto gap-6 bg-white no-scrollbar scroll-smooth animate-in slide-in-from-top-4 duration-500">
+                  {nextSixMatches.map(m => (
+                    <div key={m.id} className="min-w-[320px] sm:min-w-[380px]">
+                      <MatchCard match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />
+                    </div>
+                  ))}
+                  {nextSixMatches.length === 0 && <p className="w-full text-center py-10 font-black text-slate-300 uppercase italic">No hay más partidos pendientes</p>}
+                </div>
+              )}
             </div>
 
-            <div className="space-y-6 sm:space-y-8">
-               <div className="bg-white p-3 sm:p-5 rounded-2xl sm:rounded-[2.5rem] shadow-sm border-2 border-slate-100 flex flex-col md:flex-row gap-4 sm:gap-5 items-center">
-                  <div className="flex-1 w-full relative">
-                    <input 
-                      type="text" 
-                      placeholder="Filtrar por selección..." 
-                      className="w-full bg-slate-50 border-2 border-slate-100 rounded-xl sm:rounded-2xl px-5 sm:px-8 py-3 sm:py-5 font-bold text-xs sm:text-sm outline-none focus:border-yellow-400 transition-all shadow-inner text-slate-900 font-black"
-                      value={teamFilter}
-                      onChange={(e) => setTeamFilter(e.target.value)}
-                    />
-                    {teamFilter && <button onClick={() => setTeamFilter('')} className="absolute right-5 sm:right-8 top-1/2 -translate-y-1/2 text-slate-300 font-bold hover:text-slate-500">✖</button>}
-                  </div>
+            <div className="space-y-10">
+               <div className="flex items-center gap-4 bg-white p-2 rounded-[2rem] shadow-sm border-2 border-slate-100 focus-within:border-yellow-400 transition-all">
+                  <span className="pl-6 text-2xl">🔍</span>
+                  <input type="text" placeholder="Buscar por selección (ej: Argentina)..." className="flex-1 bg-transparent py-5 font-black text-slate-900 outline-none placeholder:text-slate-300" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} />
                </div>
-
-               {teamFilter && (
-                 <div className="space-y-4 sm:space-y-6 animate-in fade-in slide-in-from-bottom-4">
-                    <h3 className="font-black uppercase text-[10px] sm:text-xs text-slate-400 px-4 sm:px-6 tracking-widest">RESULTADOS PARA "{teamFilter}"</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-                        {filteredMatches.map(m => <MatchCard key={m.id} match={m} prediction={currentUser.predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
-                    </div>
+               {teamFilter ? (
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4">
+                    {filteredMatches.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
                  </div>
+               ) : (
+                 Object.entries(matchesByGroup).map(([groupName, groupMatches]) => (
+                   <div key={groupName} className="bg-white rounded-[3rem] shadow-xl border border-slate-200 overflow-hidden">
+                      <button onClick={() => toggleGroup(groupName)} className={`w-full p-8 flex items-center justify-between transition-colors ${expandedGroups[groupName] ? 'bg-[#001529] text-white' : 'bg-white hover:bg-slate-50'}`}>
+                        <div className="flex items-center gap-6">
+                          <span className={`w-14 h-14 flex items-center justify-center rounded-2xl font-black text-2xl shadow-lg ${expandedGroups[groupName] ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-100 text-slate-400'}`}>{groupName}</span>
+                          <h3 className="font-black uppercase italic text-3xl tracking-tighter">Grupo {groupName}</h3>
+                        </div>
+                        <span className={`text-3xl transition-transform duration-500 ${expandedGroups[groupName] ? 'rotate-180 text-yellow-400' : 'text-slate-300'}`}>▼</span>
+                      </button>
+                      {expandedGroups[groupName] && (
+                        <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-8 bg-slate-50/50 animate-in slide-in-from-top-4 duration-500">
+                          {groupMatches.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
+                        </div>
+                      )}
+                   </div>
+                 ))
                )}
+            </div>
+          </div>
+        )}
 
-               {!teamFilter && MOCK_GROUPS.map(group => (
-                  <div key={group.id} className="bg-white rounded-2xl sm:rounded-[3rem] shadow-sm border border-slate-200 overflow-hidden transition-all hover:shadow-xl">
-                     <button 
-                       onClick={() => setExpandedGroup(expandedGroup === group.id ? null : group.id)}
-                       className={`w-full text-left transition-all ${expandedGroup === group.id ? 'bg-[#001529]' : 'hover:bg-slate-50'}`}
-                     >
-                       <div className={`p-4 sm:p-8 flex flex-col gap-3 sm:gap-5 ${expandedGroup === group.id ? 'text-white' : 'text-[#001529]'}`}>
-                          <div className="flex items-center justify-between">
-                             <div className="flex items-center gap-3 sm:gap-5">
-                                <span className={`w-10 h-10 sm:w-14 sm:h-14 flex items-center justify-center rounded-xl sm:rounded-2xl font-black text-lg sm:text-2xl ${expandedGroup === group.id ? 'bg-yellow-400 text-[#001529]' : 'bg-[#001529] text-white shadow-2xl'}`}>
-                                  {group.name}
-                                </span>
-                                <h3 className="font-black uppercase italic tracking-widest text-lg sm:text-2xl">Grupo {group.name}</h3>
-                             </div>
-                             <span className={`text-xl sm:text-3xl transition-transform duration-500 ${expandedGroup === group.id ? 'rotate-180 text-yellow-400' : 'text-slate-300'}`}>▼</span>
-                          </div>
-                          <div className="flex flex-wrap gap-2 sm:gap-4 items-center justify-start">
-                             {group.teams.map(t => (
-                               <div key={t.id} className={`flex items-center gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-2xl border transition-all ${expandedGroup === group.id ? 'bg-white/10 border-white/20 hover:bg-white/20' : 'bg-slate-50 border-slate-200'}`}>
-                                  <img src={getFlagUrl(t.code)} className="w-4 h-3 sm:w-6 sm:h-4 rounded shadow-sm" />
-                                  <span className="text-[10px] sm:text-[12px] font-black uppercase italic tracking-tight">{t.name}</span>
-                               </div>
-                             ))}
-                          </div>
-                       </div>
-                     </button>
-                     {expandedGroup === group.id && (
-                       <div className="p-4 sm:p-8 bg-slate-100/50 grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 border-t-2 sm:border-t-4 border-yellow-400/30 animate-in slide-in-from-top-4">
-                          {group.matches.map(m => <MatchCard key={m.id} match={m} prediction={currentUser.predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
-                       </div>
-                     )}
-                  </div>
-               ))}
+        {activeTab === 'eliminatorias' && (
+          <div className="space-y-12">
+            <div className="bg-gradient-to-r from-[#001529] to-[#002868] p-10 rounded-[4rem] shadow-2xl text-white text-center border-b-8 border-yellow-400">
+               <h2 className="text-4xl sm:text-6xl font-black uppercase italic tracking-tighter">Cuadro de Eliminatorias</h2>
+               <p className="text-yellow-400 font-bold uppercase tracking-[0.5em] text-xs mt-4">CAMINO A LA FINAL - UNITED 2026</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+               {matchesEliminatorias.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
+            </div>
+            <div className="p-20 bg-white rounded-[4rem] border-2 border-dashed border-slate-200 text-center">
+               <img src={LOGO_2026} className="h-24 mx-auto opacity-10 mb-6 grayscale" alt="wc" />
+               <p className="text-slate-300 font-black uppercase tracking-widest text-xs italic">Las llaves se actualizan a medida que avanzan los partidos.</p>
             </div>
           </div>
         )}
 
         {activeTab === 'tablas' && (
-          <div className="space-y-6 sm:space-y-10">
-            <section className="bg-white rounded-2xl sm:rounded-[3rem] shadow-xl overflow-hidden border border-slate-200">
-               <button 
-                onClick={() => setIsGlobalRankingExpanded(!isGlobalRankingExpanded)}
-                className="w-full bg-gradient-to-r from-[#001529] to-[#002868] p-5 sm:p-10 text-white flex items-center justify-between text-left hover:brightness-110 transition-all"
-               >
-                  <div className="flex items-center gap-4 sm:gap-6">
-                    <div className="bg-gradient-to-br from-yellow-400 to-yellow-600 text-[#001529] w-12 h-12 sm:w-16 sm:h-16 flex items-center justify-center rounded-xl sm:rounded-[1.5rem] text-2xl sm:text-4xl shadow-2xl transform hover:rotate-6 transition-transform">🌍</div>
-                    <div>
-                      <h2 className="text-xl sm:text-3xl font-black uppercase italic tracking-widest">Ranking Global</h2>
-                      <p className="text-[9px] sm:text-[11px] font-bold text-yellow-400 uppercase tracking-[0.2em] sm:tracking-[0.3em]">Mística Mundial</p>
-                    </div>
-                  </div>
-                  <span className={`text-2xl sm:text-4xl transition-transform duration-500 ${isGlobalRankingExpanded ? 'rotate-180 text-yellow-400' : 'text-white/40'}`}>▼</span>
+          <div className="space-y-12">
+            <section className="bg-white rounded-[4rem] shadow-2xl overflow-hidden border border-slate-200">
+               <button onClick={() => setIsGlobalRankingExpanded(!isGlobalRankingExpanded)} className="w-full bg-gradient-to-r from-[#001529] to-[#002868] p-12 text-white flex items-center justify-between text-left">
+                  <div className="flex items-center gap-8"><div className="bg-yellow-400 text-[#001529] w-20 h-20 flex items-center justify-center rounded-[2rem] text-4xl shadow-2xl transform hover:rotate-6 transition-transform">🌍</div><div><h2 className="text-4xl font-black uppercase italic tracking-widest leading-tight">Ranking Global</h2><p className="text-yellow-400 font-bold uppercase tracking-[0.3em] text-[12px]">Lucha por la mística total</p></div></div>
+                  <span className={`text-5xl transition-transform duration-500 ${isGlobalRankingExpanded ? 'rotate-180 text-yellow-400' : ''}`}>▼</span>
                </button>
                {isGlobalRankingExpanded && (
-                 <div className="divide-y divide-slate-100 max-h-[400px] sm:max-h-[600px] overflow-y-auto animate-in slide-in-from-top-4 duration-500 no-scrollbar">
-                    {globalRanking.length > 0 ? globalRanking.slice(0, 100).map((user, i) => (
-                      <div key={user.email} className={`p-4 sm:p-8 flex items-center justify-between transition-colors ${user.email === currentUser.email ? 'bg-yellow-50/50' : 'hover:bg-slate-50'}`}>
-                         <div className="flex items-center gap-3 sm:gap-5">
-                            <span className={`w-8 h-8 sm:w-10 h-10 flex items-center justify-center font-black rounded-lg sm:rounded-xl text-xs sm:text-sm shadow-sm ${i < 3 ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-100 text-slate-400'}`}>{i + 1}</span>
-                            <span className="font-black text-slate-800 uppercase tracking-tight text-sm sm:text-lg italic">{user.username}</span>
-                         </div>
-                         <div className="flex flex-col items-end">
-                            <span className="font-black text-lg sm:text-2xl text-[#001529]">{user.points}</span>
-                            <span className="text-[8px] sm:text-[10px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span>
-                         </div>
+                 <div className="divide-y divide-slate-100 max-h-[700px] overflow-y-auto no-scrollbar animate-in slide-in-from-top-6 duration-500">
+                    {globalLeaderboard.map((user, i) => (
+                      <div key={i} className={`p-10 flex items-center justify-between hover:bg-slate-50 transition-colors ${user.email === currentUser?.email ? 'bg-yellow-50 border-x-8 border-yellow-400' : ''}`}>
+                         <div className="flex items-center gap-6"><span className={`w-12 h-12 flex items-center justify-center font-black rounded-2xl text-lg ${i < 3 ? 'bg-yellow-400 text-[#001529] scale-110 shadow-lg' : 'bg-slate-100 text-slate-400'}`}>{i + 1}</span><div className="flex flex-col"><span className="font-black text-slate-800 uppercase italic text-2xl tracking-tighter">{user.name || user.username}</span>{user.championId && <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Campeón: {TEAMS.find(t => t.id.toString() === user.championId.toString())?.name}</span>}</div></div>
+                         <div className="text-right"><span className="block font-black text-4xl text-[#001529] leading-none">{user.total_points || user.points || 0}</span><span className="text-[11px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span></div>
                       </div>
-                    )) : (
-                      <p className="p-8 text-center text-slate-400 font-bold uppercase tracking-widest text-xs">Cargando competidores...</p>
-                    )}
+                    ))}
                  </div>
                )}
             </section>
-
-            <div className="space-y-6 sm:space-y-8">
-               <div className="flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 gap-3 sm:gap-5">
-                  <h2 className="text-[10px] sm:text-sm font-black uppercase italic text-slate-500 tracking-[0.4em]">TORNEOS PRIVADOS</h2>
-                  <div className="flex gap-2 w-full sm:w-auto">
-                     <input 
-                       type="text" placeholder="Nuevo Torneo..." className="flex-1 bg-white rounded-xl sm:rounded-2xl px-4 sm:px-6 py-3 sm:py-4 text-xs sm:text-sm border-2 border-slate-100 outline-none focus:border-yellow-400 transition-all shadow-sm text-slate-900 font-black"
-                       value={newLeagueName} onChange={(e) => setNewLeagueName(e.target.value)}
-                     />
-                     <button onClick={handleCreateLeague} className="bg-[#002868] text-white px-5 sm:px-8 py-3 sm:py-4 rounded-xl sm:rounded-2xl text-[9px] sm:text-[11px] font-black uppercase hover:bg-[#001529] transition-all shadow-xl active:scale-95 tracking-widest">CREAR</button>
-                  </div>
+            <div className="space-y-10">
+               <h3 className="text-2xl font-black uppercase italic text-[#001529] flex items-center gap-4"><span className="w-2 h-8 bg-yellow-400 rounded-full"></span>Mis Torneos</h3>
+               <div className="flex flex-col md:flex-row gap-6"><div className="flex-1 flex gap-3"><input type="text" placeholder="Crear nuevo torneo..." className="flex-1 bg-white rounded-[1.5rem] px-8 py-6 font-black text-slate-900 shadow-lg border-2 border-slate-100 outline-none focus:border-yellow-400 text-lg" value={newLeagueName} onChange={(e) => setNewLeagueName(e.target.value)} /><button onClick={handleCreateLeague} className="bg-[#002868] text-white px-10 py-6 rounded-[1.5rem] font-black uppercase text-xs shadow-2xl hover:bg-slate-800 transition-all active:scale-95">CREAR</button></div></div>
+               <div className="grid grid-cols-1 gap-8">
+                 {leagues.map(league => {
+                   const isAdmin = league.ownerEmail === currentUser?.email;
+                   return (
+                     <div key={league.id} className={`bg-white rounded-[3.5rem] shadow-xl border-2 transition-colors ${expandedLeague === league.id ? 'border-yellow-400 shadow-yellow-400/10' : 'border-slate-200 hover:border-slate-300'}`}>
+                        <button onClick={() => setExpandedLeague(expandedLeague === league.id ? null : league.id)} className="w-full p-10 flex items-center justify-between"><div className="flex items-center gap-8"><div className={`w-16 h-16 flex items-center justify-center rounded-[1.5rem] text-4xl shadow-inner transition-colors ${isAdmin ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-100 text-slate-400'}`}>{isAdmin ? '👑' : '🏆'}</div><div className="text-left"><h3 className="font-black text-3xl text-[#001529] uppercase italic tracking-tighter">{league.name}</h3><p className="text-[11px] text-slate-400 font-bold uppercase tracking-[0.3em] mt-2 italic flex items-center gap-2">{isAdmin ? <span className="text-[#002868] font-black">ADMIN</span> : <span>MIEMBRO</span>}<span>•</span><span>CÓDIGO: <span className="text-[#002868] bg-[#002868]/5 px-2 py-0.5 rounded">{league.invite_code || '---'}</span></span></p></div></div><span className={`text-4xl transition-transform duration-500 ${expandedLeague === league.id ? 'rotate-180 text-yellow-400' : 'text-slate-300'}`}>▼</span></button>
+                        {expandedLeague === league.id && (
+                          <div className="p-10 bg-slate-50/50 border-t-2 border-slate-100 animate-in slide-in-from-top-6">
+                             {isAdmin && (
+                               <div className="mb-10 pb-10 border-b-2 border-dashed border-slate-200"><h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-[#002868] mb-4 italic">Panel de Administrador</h4><div className="flex flex-col gap-2"><div className="flex gap-3"><input type="email" placeholder="Email del jugador a sumar..." className={`flex-1 bg-white rounded-2xl px-6 py-4 font-black text-slate-900 shadow-sm border-2 outline-none transition-all ${newMemberError[league.id] ? 'border-red-500 focus:ring-red-500/10' : 'border-slate-100 focus:border-yellow-400'}`} value={newMemberEmail[league.id] || ""} onChange={(e) => { setNewMemberEmail(prev => ({ ...prev, [league.id]: e.target.value })); setNewMemberError(prev => ({ ...prev, [league.id]: "" })); }} /><button onClick={() => handleAddMember(league.id)} className="bg-yellow-400 text-[#001529] px-8 py-4 rounded-2xl font-black uppercase text-[10px] shadow-lg hover:bg-yellow-300 transition-all active:scale-95">SUMAR</button></div>{newMemberError[league.id] && <p className="text-red-500 font-black text-[10px] uppercase tracking-widest pl-2 italic">⚠️ {newMemberError[league.id]}</p>}</div></div>
+                             )}
+                             <div className="space-y-4"><h4 className="text-[10px] font-black uppercase tracking-[0.5em] text-slate-300 mb-6 italic">Tabla de Posiciones</h4>{[...(league.members || [])].sort((a, b) => { const userA = globalLeaderboard.find(u => u.email === a); const userB = globalLeaderboard.find(u => u.email === b); const pointsA = userA?.total_points || userA?.points || 0; const pointsB = userB?.total_points || userB?.points || 0; return pointsB - pointsA; }).map((email, idx) => {
+                                    const mUser = globalLeaderboard.find(u => u.email === email);
+                                    const isSelf = email === currentUser?.email;
+                                    return (
+                                      <div key={idx} className={`flex justify-between items-center bg-white p-6 rounded-[2.5rem] border-2 transition-all ${isSelf ? 'border-yellow-400 shadow-lg' : 'border-slate-100 shadow-sm hover:shadow-md'}`}><div className="flex items-center gap-6"><div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xs uppercase shadow-inner ${isSelf ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-800 text-white'}`}>{email.substring(0, 2)}</div><div className="flex flex-col"><span className="font-black text-slate-800 text-xl uppercase italic tracking-tighter">{mUser?.name || mUser?.username || email.split('@')[0]}</span>{email === league.ownerEmail && <span className="text-[9px] font-black text-[#002868] uppercase tracking-[0.2em] italic">Fundador</span>}</div></div><div className="flex items-center gap-8"><div className="text-right"><span className="block font-black text-3xl text-[#001529] leading-none">{mUser?.total_points || mUser?.points || 0}</span><span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span></div>{isAdmin && email !== league.ownerEmail && <button onClick={() => handleRemoveMember(league.id, email)} className="w-10 h-10 flex items-center justify-center rounded-xl bg-red-50 text-red-400 hover:bg-red-500 hover:text-white transition-all shadow-sm">🗑️</button>}</div></div>
+                                    );
+                                })}</div>
+                          </div>
+                        )}
+                     </div>
+                   );
+                 })}
                </div>
-
-               {myLeagues.map(league => (
-                 <div key={league.id} className="bg-white rounded-2xl sm:rounded-[3rem] shadow-lg border border-slate-200 overflow-hidden group">
-                    <button 
-                      onClick={() => setExpandedLeague(expandedLeague === league.id ? null : league.id)}
-                      className="w-full p-5 sm:p-10 flex items-center justify-between hover:bg-slate-50 transition-all"
-                    >
-                      <div className="flex items-center gap-4 sm:gap-6">
-                         <div className="bg-slate-100 w-12 h-12 sm:w-16 sm:h-16 flex items-center justify-center rounded-xl sm:rounded-[1.5rem] text-2xl sm:text-4xl shadow-inner group-hover:bg-yellow-400 transition-colors">🏆</div>
-                         <div className="text-left">
-                            <h3 className="font-black text-lg sm:text-2xl text-[#001529] uppercase italic tracking-tight">{league.name}</h3>
-                            <p className="text-[9px] sm:text-[11px] text-slate-400 font-bold uppercase tracking-[0.2em] mt-0.5 sm:mt-1">{league.members.length} JUGADORES</p>
-                         </div>
-                      </div>
-                      <span className={`text-2xl sm:text-3xl transition-transform duration-300 ${expandedLeague === league.id ? 'rotate-180 text-[#002868]' : 'text-slate-300'}`}>▼</span>
-                    </button>
-                    {expandedLeague === league.id && (
-                      <div className="p-5 sm:p-10 bg-slate-50 space-y-6 sm:space-y-8 border-t-2 border-slate-100 animate-in slide-in-from-top-6 duration-300">
-                         <div className="flex flex-col gap-1 w-full">
-                            <div className="flex gap-2 sm:gap-4 w-full">
-                              <input 
-                                type="email" placeholder="Email del amigo..." 
-                                className={`flex-1 bg-white border-2 rounded-xl sm:rounded-2xl px-4 sm:px-6 py-3 sm:py-4 text-xs sm:text-sm outline-none transition-all shadow-inner text-slate-900 font-black ${invitationError[league.id] ? 'border-red-500 focus:border-red-600' : 'border-slate-200 focus:border-[#002868]'}`}
-                                value={memberEmail[league.id] || ''} onChange={(e) => setMemberEmail({...memberEmail, [league.id]: e.target.value})}
-                              />
-                              <button onClick={() => handleAddMember(league.id)} className="bg-[#006341] text-white px-5 sm:px-10 py-3 sm:py-4 rounded-xl sm:rounded-2xl text-[9px] sm:text-[11px] font-black uppercase hover:bg-[#004d33] shadow-lg transition-all active:scale-95 tracking-widest">INVITAR</button>
-                            </div>
-                            {invitationError[league.id] && (
-                              <p className="text-red-500 text-[10px] font-black uppercase tracking-widest px-1 animate-in fade-in slide-in-from-top-1">
-                                {invitationError[league.id]}
-                              </p>
-                            )}
-                         </div>
-                         <div className="space-y-3 sm:space-y-4">
-                           {league.members
-                            .map(email => dbService.getUser(email))
-                            .sort((a, b) => (b?.points || 0) - (a?.points || 0))
-                            .map((member, idx) => (
-                               <div key={member?.email || idx} className="flex items-center justify-between bg-white p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] border border-slate-100 shadow-sm hover:border-[#002868]/30 transition-all">
-                                  <div className="flex items-center gap-3 sm:gap-5">
-                                     <span className="text-[10px] sm:text-sm font-black text-slate-300">{idx + 1}</span>
-                                     <span className="font-black text-sm sm:text-lg text-slate-800 italic">{member?.username || member?.email}</span>
-                                     {member?.email === league.ownerEmail && <span className="text-[7px] sm:text-[10px] bg-yellow-400 text-[#001529] px-2 sm:px-3 py-0.5 sm:py-1 rounded-lg sm:rounded-xl font-black uppercase italic tracking-tighter">ADMIN</span>}
-                                  </div>
-                                  <div className="flex items-center gap-4 sm:gap-8">
-                                     <span className="font-black text-base sm:text-2xl text-[#002868]">{member?.points || 0} <span className="text-[8px] sm:text-[10px] opacity-40">PTS</span></span>
-                                     {currentUser.email === league.ownerEmail && member?.email !== currentUser.email && (
-                                       <button 
-                                         onClick={(e) => { e.stopPropagation(); handleRemoveMember(league.id, member?.email || ''); }}
-                                         className="p-2 sm:p-4 text-red-200 hover:text-red-600 hover:bg-red-50 rounded-xl sm:rounded-2xl transition-all shadow-sm"
-                                       >
-                                          <svg className="w-4 h-4 sm:w-6 sm:h-6" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
-                                       </button>
-                                     )}
-                                  </div>
-                               </div>
-                           ))}
-                         </div>
-                      </div>
-                    )}
-                 </div>
-               ))}
             </div>
           </div>
         )}
 
-        {activeTab === 'reglas' && (
-          <div className="bg-white rounded-2xl sm:rounded-[3.5rem] shadow-2xl p-6 sm:p-12 border-t-8 sm:border-t-[12px] border-yellow-400 animate-in zoom-in duration-300">
-             <div className="text-center mb-8 sm:mb-12">
-                <div className="bg-[#001529] w-16 h-16 sm:w-24 sm:h-24 flex items-center justify-center rounded-2xl sm:rounded-[2rem] mx-auto mb-4 sm:mb-6 text-3xl sm:text-5xl shadow-2xl border-2 border-yellow-400/20">📜</div>
-                <h2 className="text-2xl sm:text-5xl font-black uppercase italic tracking-tighter text-[#001529]">Reglas Woombi 2026</h2>
-                <p className="text-slate-400 font-bold uppercase text-[9px] sm:text-[11px] tracking-[0.3em] sm:tracking-[0.5em] mt-2 sm:mt-3">Mística y Estrategia</p>
-             </div>
-             
-             <div className="space-y-6 sm:space-y-10">
-                <div className="bg-slate-50 p-5 sm:p-8 rounded-2xl sm:rounded-[2.5rem] border-l-4 sm:border-l-[10px] border-[#002868] shadow-sm">
-                   <h3 className="font-black text-lg sm:text-2xl mb-3 sm:mb-5 flex items-center gap-3 text-[#001529]">
-                      <span className="text-xl sm:text-3xl">⏳</span> Cierre VAR
-                   </h3>
-                   <p className="text-slate-600 font-semibold leading-relaxed text-sm sm:text-lg">
-                      Predicciones habilitadas hasta <span className="text-[#CE1126] font-black underline decoration-2 underline-offset-4">1 HORA ANTES</span> del inicio. No hay mística que valga después.
-                   </p>
+        {activeTab === 'perfil' && (
+          <div className="space-y-12 pb-12">
+            <div className="bg-white rounded-[4rem] shadow-2xl p-10 sm:p-20 border-t-[16px] border-[#001529] animate-in slide-in-from-bottom-6">
+              <h2 className="text-4xl sm:text-6xl font-black uppercase italic tracking-tighter text-[#001529] mb-12">Configuración</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-16">
+                <div className="space-y-12">
+                  <form onSubmit={handleUpdateProfile} className="space-y-8">
+                    <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 italic">Nombre</label><input type="text" className="w-full bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] px-6 py-4 font-black text-slate-800 outline-none focus:border-yellow-400 transition-all" value={profileForm.name} onChange={(e) => setProfileForm({...profileForm, name: e.target.value})} /></div>
+                    <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 italic">Contraseña</label><input type="password" placeholder="Opcional" className="w-full bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] px-6 py-4 font-black text-slate-800 outline-none focus:border-yellow-400 transition-all" value={profileForm.password} onChange={(e) => setProfileForm({...profileForm, password: e.target.value})} /></div>
+                    {profileSuccess && <p className="text-green-500 font-black text-[10px] uppercase tracking-widest italic">{profileSuccess}</p>}
+                    <button type="submit" className="w-full bg-[#001529] text-white py-5 rounded-[1.5rem] font-black uppercase text-xs shadow-2xl hover:bg-slate-800 transition-all">GUARDAR</button>
+                  </form>
+                  
+                  {/* Opción de Cerrar Sesión en Perfil (Mobile/Tablet focus) */}
+                  <div className="pt-10 border-t border-dashed border-slate-200">
+                    <button 
+                      onClick={handleLogout}
+                      className="w-full bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white py-4 rounded-[1.5rem] font-black uppercase text-[10px] tracking-widest transition-all border border-red-500/20 flex items-center justify-center gap-3"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                      </svg>
+                      CERRAR SESIÓN
+                    </button>
+                  </div>
                 </div>
 
-                <div className="bg-slate-50 p-5 sm:p-8 rounded-2xl sm:rounded-[2.5rem] border-l-4 sm:border-l-[10px] border-yellow-400 shadow-sm">
-                   <h3 className="font-black text-lg sm:text-2xl mb-4 sm:mb-6 flex items-center gap-3 text-[#001529]">
-                      <span className="text-xl sm:text-3xl">🔢</span> Puntuación
-                   </h3>
-                   <div className="grid grid-cols-1 gap-3 sm:gap-5">
-                      <div className="flex items-center justify-between bg-white p-4 sm:p-6 rounded-xl sm:rounded-[1.5rem] shadow-md border-b-2 sm:border-b-4 border-slate-100">
-                         <span className="font-black text-slate-700 italic text-xs sm:text-base">Ganador / Empate</span>
-                         <span className="bg-[#002868] text-white px-4 sm:px-6 py-1 sm:py-2 rounded-full font-black text-sm sm:text-xl shadow-lg">3 PTS</span>
-                      </div>
-                      <div className="flex items-center justify-between bg-white p-4 sm:p-6 rounded-xl sm:rounded-[1.5rem] shadow-md border-b-2 sm:border-b-4 border-slate-100">
-                         <span className="font-black text-slate-700 italic text-xs sm:text-base">Goles de 1 equipo</span>
-                         <span className="bg-yellow-400 text-[#001529] px-4 sm:px-6 py-1 sm:py-2 rounded-full font-black text-sm sm:text-xl shadow-lg">+1 PT</span>
-                      </div>
-                      <div className="flex items-center justify-between bg-gradient-to-r from-[#001529] to-[#002868] p-5 sm:p-8 rounded-2xl sm:rounded-[2rem] shadow-2xl border-2 border-yellow-400/30 transform hover:scale-102 transition-all">
-                         <div className="flex flex-col">
-                            <span className="font-black text-yellow-400 italic text-lg sm:text-2xl tracking-tighter leading-none">RESULTADO PERFECTO</span>
-                            <span className="text-white/50 text-[7px] sm:text-[10px] font-black uppercase mt-1">Adivinaste marcador exacto</span>
-                         </div>
-                         <span className="bg-yellow-400 text-[#001529] px-4 sm:px-8 py-1.5 sm:py-3 rounded-xl sm:rounded-2xl font-black text-xl sm:text-3xl shadow-2xl border-2 border-white/20">6 PTS</span>
-                      </div>
-                   </div>
+                <div className="space-y-10">
+                  <div>
+                    <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6 italic">Aciertos (Simulados)</h3>
+                    <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 no-scrollbar">
+                      {currentPointsHistory.map((entry: any) => (
+                        <div key={entry.id} className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex justify-between items-center shadow-sm">
+                          <div className="flex flex-col">
+                            <span className="font-black text-slate-800 text-sm uppercase italic tracking-tight">{entry.detail}</span>
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{new Date(entry.date).toLocaleDateString()}</span>
+                          </div>
+                          <span className="bg-yellow-400 text-[#001529] px-4 py-1.5 rounded-xl font-black text-sm shadow-sm">+{entry.points}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="bg-gradient-to-br from-yellow-400 to-yellow-600 p-8 rounded-[2.5rem] shadow-xl text-[#001529]">
+                    <h4 className="text-[10px] font-black uppercase tracking-widest mb-1 italic opacity-60">TU SCORE TOTAL</h4>
+                    <p className="text-5xl font-black italic tracking-tighter">{currentUser.total_points || 0} PTS</p>
+                  </div>
                 </div>
-
-                <div className="bg-slate-50 p-5 sm:p-8 rounded-2xl sm:rounded-[2.5rem] border-l-4 sm:border-l-[10px] border-[#CE1126] shadow-sm">
-                   <h3 className="font-black text-lg sm:text-2xl mb-3 sm:mb-5 flex items-center gap-3 text-[#001529]">
-                      <span className="text-xl sm:text-3xl">🏅</span> Bono de Campeón
-                   </h3>
-                   <p className="text-slate-600 font-semibold leading-relaxed text-sm sm:text-lg">
-                      Si adivinás quién levanta la Copa antes de que empiece el mundial, te llevás un bono de <span className="text-[#CE1126] font-black text-xl sm:text-2xl">20 PUNTOS</span> extra al final del torneo.
-                   </p>
-                </div>
-             </div>
+              </div>
+            </div>
           </div>
         )}
-
-        {activeTab === 'eliminatorias' && (
-          <div className="text-center py-20 sm:py-32 bg-white rounded-3xl sm:rounded-[4rem] shadow-2xl overflow-hidden relative border border-slate-100">
-             <div className="absolute top-0 left-0 w-full h-2 sm:h-3 bg-gradient-to-r from-yellow-400 via-yellow-600 to-yellow-400"></div>
-             <img src={LOGO_2026} alt="logo" className="w-24 sm:w-40 mx-auto mb-6 sm:mb-8 opacity-10 grayscale" />
-             <h2 className="text-2xl sm:text-4xl font-black uppercase italic tracking-tighter text-[#001529]">Camino a la Gloria</h2>
-             <p className="text-slate-400 mt-3 sm:mt-5 font-bold uppercase text-[10px] sm:text-[12px] tracking-[0.3em] sm:tracking-[0.5em]">LUEGO DE LA FASE DE GRUPOS</p>
-             <div className="mt-8 sm:mt-12 flex justify-center gap-4 sm:gap-6">
-                <div className="w-10 h-10 sm:w-16 sm:h-16 rounded-xl sm:rounded-3xl border-2 sm:border-4 border-slate-100 animate-pulse bg-slate-50"></div>
-                <div className="w-10 h-10 sm:w-16 sm:h-16 rounded-xl sm:rounded-3xl border-2 sm:border-4 border-slate-100 animate-pulse delay-150 bg-slate-50"></div>
-             </div>
-          </div>
+        
+        {activeTab === 'reglas' && (
+           <div className="bg-white rounded-[4rem] shadow-2xl p-10 sm:p-20 border-t-[16px] border-yellow-400 animate-in zoom-in duration-500 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-96 h-96 bg-yellow-400/5 rounded-full blur-3xl -mr-48 -mt-48"></div>
+              <h2 className="text-5xl sm:text-7xl font-black uppercase italic tracking-tighter text-[#001529] text-center mb-16 relative z-10">Mística Woombi</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-12 relative z-10">
+                 <div className="space-y-10"><div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-[#002868] shadow-sm"><h3 className="font-black text-2xl mb-6 flex items-center gap-4">⏳ CIERRE DE ESTADIO</h3><p className="font-bold text-slate-600 leading-relaxed uppercase text-sm tracking-wide">Las predicciones se bloquean <span className="text-[#002868]">1 hora antes</span> del silbatazo inicial.</p></div><div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-yellow-400 shadow-sm"><h3 className="font-black text-2xl mb-6 flex items-center gap-4">🔢 SISTEMA DE PUNTOS</h3><ul className="space-y-5"><li className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100"><div className="flex flex-col"><span className="font-black text-slate-800 text-lg italic">RESULTADO EXACTO</span><span className="text-[10px] text-slate-400 font-bold tracking-widest">PEGAS EL SCORE COMPLETO</span></div><span className="bg-yellow-400 text-[#001529] px-6 py-2 rounded-xl font-black text-xl">3 PTS</span></li><li className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100"><div className="flex flex-col"><span className="font-black text-slate-800 text-lg italic">GANADOR / EMPATE</span><span className="text-[10px] text-slate-400 font-bold tracking-widest">PEGAS SOLO LA TENDENCIA</span></div><span className="bg-[#002868] text-white px-6 py-2 rounded-xl font-black text-xl">1 PT</span></li></ul></div></div>
+                 <div className="space-y-10"><div className="bg-[#001529] p-10 rounded-[3rem] text-white shadow-2xl border-b-[12px] border-yellow-400"><h3 className="font-black text-2xl mb-6 flex items-center gap-4 text-yellow-400">🏅 BONO CAMPEÓN</h3><p className="font-bold text-slate-300 leading-relaxed uppercase text-sm tracking-wide mb-8 italic">Si tu candidato levanta la Copa el 19 de Julio de 2026...</p><div className="flex items-center justify-center bg-white/10 p-10 rounded-[2rem] border-2 border-dashed border-white/20"><div className="text-center"><span className="block text-[10px] font-black tracking-[0.4em] text-yellow-400 mb-2">GRAN PREMIO</span><span className="text-7xl font-black text-white italic tracking-tighter">HASTA 50 <span className="text-3xl">PTS</span></span></div></div></div></div>
+              </div>
+           </div>
         )}
       </main>
 
-      <nav className="fixed bottom-0 sm:bottom-10 left-0 sm:left-1/2 sm:-translate-x-1/2 w-full sm:w-auto bg-[#001529]/95 backdrop-blur-2xl shadow-2xl sm:rounded-full px-2 py-3 sm:px-5 sm:py-4 flex items-center justify-around sm:justify-center sm:gap-3 z-50 border-t sm:border border-white/10 sm:ring-8 sm:ring-[#001529]/10">
+      <nav className={`fixed bottom-0 sm:bottom-10 left-0 sm:left-1/2 sm:-translate-x-1/2 w-full sm:w-auto bg-[#001529]/95 backdrop-blur-3xl shadow-2xl sm:rounded-full px-4 py-4 flex items-center justify-around sm:gap-2 z-50 border-t sm:border-2 border-white/10 transition-transform duration-500 ${showNav ? 'translate-y-0' : 'translate-y-full sm:translate-y-[150%]'}`}>
         <NavItem active={activeTab === 'inicio'} onClick={() => setActiveTab('inicio')} icon="🏠" label="Inicio" />
         <NavItem active={activeTab === 'eliminatorias'} onClick={() => setActiveTab('eliminatorias')} icon="⚔️" label="Llaves" />
         <NavItem active={activeTab === 'tablas'} onClick={() => setActiveTab('tablas')} icon="🏆" label="Tablas" />
         <NavItem active={activeTab === 'reglas'} onClick={() => setActiveTab('reglas')} icon="📜" label="Reglas" />
+        <NavItem active={activeTab === 'perfil'} onClick={() => setActiveTab('perfil')} icon="👤" label="Perfil" />
       </nav>
     </div>
   );
@@ -588,12 +686,12 @@ const App: React.FC = () => {
 const NavItem: React.FC<{ active: boolean; onClick: () => void; icon: string; label: string }> = ({ active, onClick, icon, label }) => (
   <button
     onClick={onClick}
-    className={`flex items-center gap-1.5 sm:gap-3 px-3 sm:px-7 py-2 sm:py-3.5 rounded-full transition-all duration-500 transform active:scale-90 ${
-      active ? 'bg-yellow-400 text-[#001529] scale-105 sm:scale-110 shadow-lg' : 'text-white/30 hover:text-white/80'
+    className={`flex items-center gap-2 sm:gap-3 px-4 sm:px-8 py-2.5 sm:py-3.5 rounded-full transition-all duration-500 transform ${
+      active ? 'bg-yellow-400 text-[#001529] scale-110 shadow-2xl ring-4 ring-yellow-400/20' : 'text-white/30 hover:text-white/80 hover:bg-white/5'
     }`}
   >
-    <span className="text-xl sm:text-3xl">{icon}</span>
-    {active && <span className="font-black text-[9px] sm:text-[11px] uppercase tracking-tighter sm:tracking-[0.2em]">{label}</span>}
+    <span className="text-xl sm:text-2xl">{icon}</span>
+    {active && <span className="font-black text-[10px] sm:text-[12px] uppercase tracking-widest">{label}</span>}
   </button>
 );
 
