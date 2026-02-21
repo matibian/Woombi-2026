@@ -1,6 +1,7 @@
 
 [
   { "email": "mati@woombi.com", "username": "mati", "password": "mati", "predictions": {}, "championId": null, "points": 0 },
+  { "email": "woody@woombi.com", "username": "woody", "password": "woody", "predictions": {}, "championId": "1", "points": 100 },
   { "email": "veron@edlp.com", "username": "Juan Sebastián Verón", "password": "123", "predictions": {}, "championId": "10", "points": 580 },
   { "email": "brana@edlp.com", "username": "Rodrigo Braña", "password": "123", "predictions": {}, "championId": "10", "points": 490 },
   { "email": "boselli@edlp.com", "username": "Mauro Boselli", "password": "123", "predictions": {}, "championId": "10", "points": 510 },

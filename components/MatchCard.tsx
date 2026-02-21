@@ -45,7 +45,6 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
       predicted_away_score: side === 'away' ? sanitizedNum : (prediction?.predicted_away_score || 0),
     };
 
-    // Si deja de ser empate, reseteamos el ganador seleccionado
     if (newPrediction.predicted_home_score !== newPrediction.predicted_away_score) {
       newPrediction.predicted_winner_id = null;
     }
@@ -68,7 +67,12 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
     setLoading(false);
   };
 
-  const getFlagUrl = (code: string) => `https://flagcdn.com/w160/${code.toLowerCase()}.png`;
+  const placeholderFlag = "https://placehold.co/160x100/f1f5f9/94a3b8?text=TBD";
+  
+  const getFlagUrl = (code?: string) => {
+    if (!code) return placeholderFlag;
+    return `https://flagcdn.com/w160/${code.toLowerCase()}.png`;
+  };
 
   const isKnockout = match.stage !== 'fase_grupos';
   const isDrawPredicted = prediction && prediction.predicted_home_score === prediction.predicted_away_score && prediction.predicted_home_score !== null;
@@ -98,19 +102,22 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
       <div className="flex items-center justify-between gap-2 sm:gap-4">
         {/* Home Team */}
         <div className="flex-1 flex flex-col items-center gap-2">
-          <img 
-            src={match.home_team?.fifa_code ? getFlagUrl(match.home_team.fifa_code) : ''} 
-            className={`w-12 h-8 sm:w-14 sm:h-9 object-cover rounded-lg shadow-md border border-slate-50 ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.home_team?.id ? 'opacity-40 grayscale' : ''}`}
-            alt="flag"
-          />
-          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center">
+          <div className="relative group">
+            <img 
+              src={getFlagUrl(match.home_team?.flag_url)} 
+              className={`w-14 h-9 sm:w-16 sm:h-10 object-cover rounded-md shadow-sm border border-slate-100 transition-all ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.home_team?.id ? 'opacity-30 grayscale' : 'group-hover:scale-105'}`}
+              alt={match.home_team?.name || 'Home Flag'}
+              loading="lazy"
+              onError={(e) => { (e.target as HTMLImageElement).src = placeholderFlag }}
+            />
+          </div>
+          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center justify-center leading-tight">
             {match.home_team?.name || 'TBD'}
           </div>
         </div>
 
         {/* Prediction vs Real Result */}
         <div className="flex flex-col items-center gap-2">
-          {/* Real Result (Only if finished) */}
           {match.status === 'finalizado' && (
              <div className="flex items-center gap-3 bg-yellow-400 px-4 py-1 rounded-full shadow-sm mb-1 transform -rotate-1">
                 <span className="text-xs font-black text-[#001529]">{match.home_score}</span>
@@ -147,18 +154,21 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
 
         {/* Away Team */}
         <div className="flex-1 flex flex-col items-center gap-2">
-          <img 
-            src={match.away_team?.fifa_code ? getFlagUrl(match.away_team.fifa_code) : ''} 
-            className={`w-12 h-8 sm:w-14 sm:h-9 object-cover rounded-lg shadow-md border border-slate-50 ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.away_team?.id ? 'opacity-40 grayscale' : ''}`}
-            alt="flag"
-          />
-          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center">
+          <div className="relative group">
+            <img 
+              src={getFlagUrl(match.away_team?.flag_url)} 
+              className={`w-14 h-9 sm:w-16 sm:h-10 object-cover rounded-md shadow-sm border border-slate-100 transition-all ${match.status === 'finalizado' && match.winner_id && match.winner_id !== match.away_team?.id ? 'opacity-30 grayscale' : 'group-hover:scale-105'}`}
+              alt={match.away_team?.name || 'Away Flag'}
+              loading="lazy"
+              onError={(e) => { (e.target as HTMLImageElement).src = placeholderFlag }}
+            />
+          </div>
+          <div className="font-black text-slate-900 text-[10px] sm:text-[11px] text-center uppercase italic h-8 flex items-center justify-center leading-tight">
             {match.away_team?.name || 'TBD'}
           </div>
         </div>
       </div>
 
-      {/* Knockout Tie-breaker Selection */}
       {isKnockout && isDrawPredicted && !isLocked && (
         <div className="mt-4 p-3 bg-blue-50 rounded-2xl border border-blue-100 animate-in zoom-in duration-300">
           <p className="text-[9px] font-black text-blue-600 uppercase text-center mb-3 tracking-widest">¿Quién avanza por penales?</p>
@@ -179,7 +189,6 @@ const MatchCard: React.FC<MatchCardProps> = ({ match, prediction, onUpdate }) =>
         </div>
       )}
 
-      {/* Winner Display for finished knockout matches */}
       {isKnockout && match.status === 'finalizado' && match.home_score === match.away_score && (
         <div className="mt-3 text-center">
           <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest italic">Avanzó: </span>

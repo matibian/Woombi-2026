@@ -135,6 +135,17 @@ const App: React.FC = () => {
         const initialExpanded: Record<string, boolean> = {};
         groups.forEach((g, idx) => { initialExpanded[g as string] = idx === 0; });
         setExpandedGroups(initialExpanded);
+      } else {
+        const [apiMatches, apiPredictions, leaderboard] = await Promise.all([
+          api.getMatches(),
+          api.getPredictions(),
+          api.getLeaderboard()
+        ]);
+        setMatches(apiMatches);
+        const preds: Record<number|string, UserPrediction> = {};
+        apiPredictions.forEach((p: any) => { preds[p.match_id] = p; });
+        setPredictions(preds);
+        setGlobalLeaderboard(leaderboard);
       }
     } catch (err) { console.error("Error cargando datos:", err); } finally { setLoading(false); }
   };
@@ -166,7 +177,9 @@ const App: React.FC = () => {
     localStorage.setItem('woombi_source', dataSource);
     if (dataSource === 'api') {
       const res = await api.register(authForm);
-      if (res.errors) { setAuthError(Object.values(res.errors).flat()[0] as string); }
+      if (res.errors) { 
+        setAuthError(Object.values(res.errors).flat()[0] as string); 
+      }
       else if (res.token) {
         localStorage.setItem('woombi_token', res.token);
         localStorage.setItem('woombi_user', JSON.stringify(res.user));
@@ -187,7 +200,7 @@ const App: React.FC = () => {
   const handlePredictionUpdate = async (pred: UserPrediction) => {
     setPredictions(prev => ({ ...prev, [pred.match_id]: pred }));
     if (dataSource === 'api') {
-      try { await api.updatePrediction(pred.match_id as any, pred.predicted_home_score!, pred.predicted_away_score!); } catch (err) { console.error("API update error"); }
+      try { await api.updatePrediction(pred.match_id as any, pred.predicted_home_score!, pred.predicted_away_score!, pred.predicted_winner_id); } catch (err) { console.error("API update error"); }
     } else if (currentUser) {
       const db = dbService.getDb();
       const dbUser = db.users.find((u: any) => u.email === currentUser.email);
@@ -201,14 +214,9 @@ const App: React.FC = () => {
     const updatedUser = { ...currentUser, champion_id: teamId };
     setCurrentUser(updatedUser);
     localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
-    if (dataSource === 'local') {
-      const db = dbService.getDb();
-      const dbUser = db.users.find((u: any) => u.email === currentUser.email);
-      if (dbUser) { dbUser.championId = teamId; dbService.saveDb(db); }
-    }
   };
 
-  const handleLockChampion = () => {
+  const handleLockChampion = async () => {
     if (!currentUser || !currentUser.champion_id || currentUser.champion_locked) return;
     
     if (!isConfirmingLock) {
@@ -220,10 +228,17 @@ const App: React.FC = () => {
     setCurrentUser(updatedUser);
     localStorage.setItem('woombi_user', JSON.stringify(updatedUser));
     
-    if (dataSource === 'local') {
+    if (dataSource === 'api') {
+      try {
+        await api.updateChampion(currentUser.champion_id);
+      } catch (err) {
+        console.error("Error al guardar campeón en API:", err);
+      }
+    } else if (dataSource === 'local') {
       const db = dbService.getDb();
       const dbUser = db.users.find((u: any) => u.email === currentUser.email);
       if (dbUser) {
+        dbUser.championId = currentUser.champion_id;
         dbUser.champion_locked = true;
         dbService.saveDb(db);
       }
@@ -287,7 +302,7 @@ const App: React.FC = () => {
     return matches.filter(m => (m.home_team?.name || '').toLowerCase().includes(teamFilter.toLowerCase()) || (m.away_team?.name || '').toLowerCase().includes(teamFilter.toLowerCase()));
   }, [teamFilter, matches]);
 
-  const matchesByGroup = useMemo(() => {
+  const matchesByGroup = useMemo<Record<string, Match[]>>(() => {
     const groups: Record<string, Match[]> = {};
     matches.filter(m => m.stage === 'fase_grupos').forEach(m => {
       const gName = m.tournament_group?.name || 'A';
@@ -311,6 +326,11 @@ const App: React.FC = () => {
   };
 
   const LOGO_2026 = "https://paladarnegro.net/escudoteca/copas/copamundial/png/mundial_2026.png";
+  const placeholderFlag = "https://placehold.co/160x100/f1f5f9/94a3b8?text=TBD";
+  const getFlagUrl = (code?: string) => {
+    if (!code) return placeholderFlag;
+    return `https://flagcdn.com/w160/${code.toLowerCase()}.png`;
+  };
 
   if (loading) return (
     <div className="min-h-screen bg-[#001529] flex items-center justify-center">
@@ -323,6 +343,7 @@ const App: React.FC = () => {
       <div className="w-full max-w-md bg-white/5 backdrop-blur-xl p-8 sm:p-10 rounded-[3rem] border border-white/10 shadow-2xl relative z-10">
         <div className="text-center mb-10">
           <img src={LOGO_2026} alt="WC 2026" className="w-20 mx-auto mb-6 invert brightness-200" />
+          {/* FIXED: corrected typo classNametext-5xl to className="text-5xl" which caused syntax and parsing errors */}
           <h1 className="text-5xl marker-font text-yellow-400 mb-2">WOOMBI</h1>
           <p className="text-white font-black uppercase tracking-[0.4em] text-[10px] opacity-70">Prode Mundial 2026</p>
         </div>
@@ -334,6 +355,9 @@ const App: React.FC = () => {
           {isRegistering && ( <input type="text" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="NOMBRE COMPLETO" value={authForm.name} onChange={(e) => setAuthForm({...authForm, name: e.target.value})} /> )}
           <input type="email" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="EMAIL" value={authForm.email} onChange={(e) => setAuthForm({...authForm, email: e.target.value})} />
           <input type="password" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="CONTRASEÑA" value={authForm.password} onChange={(e) => setAuthForm({...authForm, password: e.target.value})} />
+          {isRegistering && (
+            <input type="password" required className="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-4 text-white font-bold placeholder:text-white/40 outline-none text-sm" placeholder="CONFIRMAR CONTRASEÑA" value={authForm.password_confirmation} onChange={(e) => setAuthForm({...authForm, password_confirmation: e.target.value})} />
+          )}
           {authError && <p className="text-red-400 text-[10px] font-black text-center uppercase tracking-widest leading-tight">{authError}</p>}
           <button type="submit" className={`w-full font-black py-4 rounded-xl uppercase text-xs shadow-xl transition-all active:scale-95 ${dataSource === 'api' ? 'bg-[#002868] text-white hover:bg-[#001529]' : 'bg-yellow-400 text-[#001529] hover:bg-yellow-300'}`}>{isRegistering ? 'Crear Cuenta' : 'Ingresar al Estadio'}</button>
           <div className="text-center mt-4"> <button type="button" onClick={() => { setIsRegistering(!isRegistering); setAuthError(''); }} className="text-white/40 text-[9px] font-black uppercase tracking-widest hover:text-white transition-colors underline underline-offset-4">{isRegistering ? '¿Ya tienes cuenta? Login' : '¿Eres nuevo? Regístrate'}</button> </div>
@@ -365,7 +389,6 @@ const App: React.FC = () => {
               <span className="text-[8px] sm:text-[10px] text-yellow-400/70 font-black uppercase tracking-[0.2em]">MIS PUNTOS</span>
               <span className="text-2xl sm:text-4xl font-black text-white leading-none tracking-tighter italic">{currentUser.total_points || 0}</span>
             </div>
-            {/* Botón Cerrar Sesión en Header (Desktop) */}
             <button 
               onClick={handleLogout}
               className="hidden md:flex items-center justify-center w-12 h-12 bg-white/5 hover:bg-red-500/20 text-white/40 hover:text-red-400 rounded-2xl border border-white/10 transition-all"
@@ -382,8 +405,6 @@ const App: React.FC = () => {
       <main className="max-w-5xl mx-auto px-4 pt-8 sm:pt-12">
         {activeTab === 'inicio' && (
           <div className="space-y-8 sm:space-y-12">
-            
-            {/* Widget Mi Candidato al Título */}
             {!currentUser.champion_locked ? (
               <div className="bg-gradient-to-r from-[#001529] to-[#002868] p-8 sm:p-10 rounded-[3rem] shadow-2xl text-white border-b-8 border-yellow-400 relative overflow-hidden transition-all duration-700">
                 <div className="relative z-10 flex flex-col sm:flex-row items-center justify-between gap-8">
@@ -418,15 +439,15 @@ const App: React.FC = () => {
                           </p>
                           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
                             <div className="bg-yellow-400 text-[#001529] p-3 rounded-xl text-center shadow-lg">
-                              <span className="block text-[8px] font-black uppercase">AHORA</span>
+                              <span className="block text-[8px] font-black uppercase">BLOQUEAR HOY</span>
                               <span className="text-2xl font-black">50 <span className="text-xs">PTS</span></span>
                             </div>
                             <div className="bg-white/5 border border-white/10 p-3 rounded-xl text-center opacity-60">
-                              <span className="block text-[8px] font-black uppercase">16AVOs</span>
+                              <span className="block text-[8px] font-black uppercase">POST 16AVOs</span>
                               <span className="text-2xl font-black">30 <span className="text-xs">PTS</span></span>
                             </div>
                             <div className="bg-white/5 border border-white/10 p-3 rounded-xl text-center opacity-40">
-                              <span className="block text-[8px] font-black uppercase">CUARTOS</span>
+                              <span className="block text-[8px] font-black uppercase">EN CUARTOS</span>
                               <span className="text-2xl font-black">10 <span className="text-xs">PTS</span></span>
                             </div>
                           </div>
@@ -435,7 +456,7 @@ const App: React.FC = () => {
                               onClick={handleLockChampion}
                               className="flex-1 bg-yellow-400 text-[#001529] py-4 rounded-xl font-black uppercase text-xs shadow-2xl hover:bg-yellow-300 transition-all"
                             >
-                              CONFIRMAR DEFINITIVO
+                              CONFIRMAR ELECCIÓN
                             </button>
                             <button 
                               onClick={() => setIsConfirmingLock(false)}
@@ -449,22 +470,29 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex items-center gap-6 relative z-10">
-                     {selectedChampionTeam && <img src={`https://flagcdn.com/w160/${selectedChampionTeam.fifa_code.toLowerCase()}.png`} className="w-24 h-16 object-cover rounded-xl shadow-2xl border-2 border-white/20 transform rotate-3" alt="flag" />}
+                     {selectedChampionTeam && (
+                        <img 
+                          src={getFlagUrl(selectedChampionTeam.flag_url)} 
+                          className="w-24 h-16 object-cover rounded-xl shadow-2xl border-2 border-white/20 transform rotate-3" 
+                          alt="flag"
+                          onError={(e) => { (e.target as HTMLImageElement).src = placeholderFlag }}
+                        />
+                     )}
                      <img src={LOGO_2026} className="h-24 invert opacity-20 transform -rotate-12" alt="wc" />
                   </div>
                 </div>
               </div>
             ) : (
-              /* El "Globo" o Badge Final */
               <div className="flex justify-center animate-in slide-in-from-top-12 duration-1000">
                 <div className="relative group">
                   <div className="absolute inset-0 bg-yellow-400/20 blur-3xl rounded-full scale-150 animate-pulse"></div>
                   <div className="relative bg-white/90 backdrop-blur-xl border-4 border-yellow-400 px-10 py-5 rounded-full shadow-[0_20px_50px_rgba(234,179,8,0.3)] flex items-center gap-6 transition-transform hover:scale-105">
                     <div className="w-16 h-12 relative">
                       <img 
-                        src={`https://flagcdn.com/w160/${selectedChampionTeam?.fifa_code.toLowerCase()}.png`} 
+                        src={getFlagUrl(selectedChampionTeam?.flag_url)} 
                         className="w-full h-full object-cover rounded-lg shadow-md border-2 border-white"
                         alt="flag"
+                        onError={(e) => { (e.target as HTMLImageElement).src = placeholderFlag }}
                       />
                       <span className="absolute -top-3 -right-3 bg-[#001529] text-yellow-400 w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-black shadow-lg">50</span>
                     </div>
@@ -479,7 +507,6 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {/* Widget: Próximos Partidos (Knockout) Desplegable */}
             <div className="bg-white rounded-[3rem] shadow-xl border border-slate-200 overflow-hidden transition-all">
               <div 
                 onClick={() => setIsNextMatchesExpanded(!isNextMatchesExpanded)}
@@ -488,7 +515,7 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-6">
                   <div className="bg-[#002868] text-white w-12 h-12 flex items-center justify-center rounded-2xl text-xl shadow-lg">⚡</div>
                   <div>
-                    <h3 className="font-black uppercase italic text-2xl tracking-tighter text-[#001529]">Próximos Partidos (Eliminatorias)</h3>
+                    <h3 className="font-black uppercase italic text-2xl tracking-tighter text-[#001529]">Próximos Partidos</h3>
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{nextSixMatches.length} partidos por jugar</p>
                   </div>
                 </div>
@@ -507,7 +534,6 @@ const App: React.FC = () => {
                       <MatchCard match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />
                     </div>
                   ))}
-                  {nextSixMatches.length === 0 && <p className="w-full text-center py-10 font-black text-slate-300 uppercase italic">No hay más partidos pendientes</p>}
                 </div>
               )}
             </div>
@@ -515,14 +541,9 @@ const App: React.FC = () => {
             <div className="space-y-10">
                <div className="flex items-center gap-4 bg-white p-2 rounded-[2rem] shadow-sm border-2 border-slate-100 focus-within:border-yellow-400 transition-all">
                   <span className="pl-6 text-2xl">🔍</span>
-                  <input type="text" placeholder="Buscar por selección (ej: Argentina)..." className="flex-1 bg-transparent py-5 font-black text-slate-900 outline-none placeholder:text-slate-300" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} />
+                  <input type="text" placeholder="Buscar por selección..." className="flex-1 bg-transparent py-5 font-black text-slate-900 outline-none placeholder:text-slate-300" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} />
                </div>
-               {teamFilter ? (
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4">
-                    {filteredMatches.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
-                 </div>
-               ) : (
-                 Object.entries(matchesByGroup).map(([groupName, groupMatches]) => (
+               {!teamFilter && (Object.entries(matchesByGroup) as [string, Match[]][]).map(([groupName, groupMatches]) => (
                    <div key={groupName} className="bg-white rounded-[3rem] shadow-xl border border-slate-200 overflow-hidden">
                       <button onClick={() => toggleGroup(groupName)} className={`w-full p-8 flex items-center justify-between transition-colors ${expandedGroups[groupName] ? 'bg-[#001529] text-white' : 'bg-white hover:bg-slate-50'}`}>
                         <div className="flex items-center gap-6">
@@ -537,8 +558,12 @@ const App: React.FC = () => {
                         </div>
                       )}
                    </div>
-                 ))
-               )}
+                 ))}
+                 {teamFilter && (
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                     {filteredMatches.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
+                   </div>
+                 )}
             </div>
           </div>
         )}
@@ -551,10 +576,6 @@ const App: React.FC = () => {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                {matchesEliminatorias.map(m => <MatchCard key={m.id} match={m} prediction={predictions[m.id]} onUpdate={handlePredictionUpdate} />)}
-            </div>
-            <div className="p-20 bg-white rounded-[4rem] border-2 border-dashed border-slate-200 text-center">
-               <img src={LOGO_2026} className="h-24 mx-auto opacity-10 mb-6 grayscale" alt="wc" />
-               <p className="text-slate-300 font-black uppercase tracking-widest text-xs italic">Las llaves se actualizan a medida que avanzan los partidos.</p>
             </div>
           </div>
         )}
@@ -570,8 +591,8 @@ const App: React.FC = () => {
                  <div className="divide-y divide-slate-100 max-h-[700px] overflow-y-auto no-scrollbar animate-in slide-in-from-top-6 duration-500">
                     {globalLeaderboard.map((user, i) => (
                       <div key={i} className={`p-10 flex items-center justify-between hover:bg-slate-50 transition-colors ${user.email === currentUser?.email ? 'bg-yellow-50 border-x-8 border-yellow-400' : ''}`}>
-                         <div className="flex items-center gap-6"><span className={`w-12 h-12 flex items-center justify-center font-black rounded-2xl text-lg ${i < 3 ? 'bg-yellow-400 text-[#001529] scale-110 shadow-lg' : 'bg-slate-100 text-slate-400'}`}>{i + 1}</span><div className="flex flex-col"><span className="font-black text-slate-800 uppercase italic text-2xl tracking-tighter">{user.name || user.username}</span>{user.championId && <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Campeón: {TEAMS.find(t => t.id.toString() === user.championId.toString())?.name}</span>}</div></div>
-                         <div className="text-right"><span className="block font-black text-4xl text-[#001529] leading-none">{user.total_points || user.points || 0}</span><span className="text-[11px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span></div>
+                         <div className="flex items-center gap-6"><span className={`w-12 h-12 flex items-center justify-center font-black rounded-2xl text-lg ${i < 3 ? 'bg-yellow-400 text-[#001529] scale-110 shadow-lg' : 'bg-slate-100 text-slate-400'}`}>{i + 1}</span><div className="flex flex-col"><span className="font-black text-slate-800 uppercase italic text-2xl tracking-tighter">{user.name || user.username}</span></div></div>
+                         <div className="text-right"><span className="block font-black text-4xl text-[#001529] leading-none">{user.total_points || 0}</span><span className="text-[11px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span></div>
                       </div>
                     ))}
                  </div>
@@ -579,31 +600,18 @@ const App: React.FC = () => {
             </section>
             <div className="space-y-10">
                <h3 className="text-2xl font-black uppercase italic text-[#001529] flex items-center gap-4"><span className="w-2 h-8 bg-yellow-400 rounded-full"></span>Mis Torneos</h3>
-               <div className="flex flex-col md:flex-row gap-6"><div className="flex-1 flex gap-3"><input type="text" placeholder="Crear nuevo torneo..." className="flex-1 bg-white rounded-[1.5rem] px-8 py-6 font-black text-slate-900 shadow-lg border-2 border-slate-100 outline-none focus:border-yellow-400 text-lg" value={newLeagueName} onChange={(e) => setNewLeagueName(e.target.value)} /><button onClick={handleCreateLeague} className="bg-[#002868] text-white px-10 py-6 rounded-[1.5rem] font-black uppercase text-xs shadow-2xl hover:bg-slate-800 transition-all active:scale-95">CREAR</button></div></div>
-               <div className="grid grid-cols-1 gap-8">
-                 {leagues.map(league => {
-                   const isAdmin = league.ownerEmail === currentUser?.email;
-                   return (
-                     <div key={league.id} className={`bg-white rounded-[3.5rem] shadow-xl border-2 transition-colors ${expandedLeague === league.id ? 'border-yellow-400 shadow-yellow-400/10' : 'border-slate-200 hover:border-slate-300'}`}>
-                        <button onClick={() => setExpandedLeague(expandedLeague === league.id ? null : league.id)} className="w-full p-10 flex items-center justify-between"><div className="flex items-center gap-8"><div className={`w-16 h-16 flex items-center justify-center rounded-[1.5rem] text-4xl shadow-inner transition-colors ${isAdmin ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-100 text-slate-400'}`}>{isAdmin ? '👑' : '🏆'}</div><div className="text-left"><h3 className="font-black text-3xl text-[#001529] uppercase italic tracking-tighter">{league.name}</h3><p className="text-[11px] text-slate-400 font-bold uppercase tracking-[0.3em] mt-2 italic flex items-center gap-2">{isAdmin ? <span className="text-[#002868] font-black">ADMIN</span> : <span>MIEMBRO</span>}<span>•</span><span>CÓDIGO: <span className="text-[#002868] bg-[#002868]/5 px-2 py-0.5 rounded">{league.invite_code || '---'}</span></span></p></div></div><span className={`text-4xl transition-transform duration-500 ${expandedLeague === league.id ? 'rotate-180 text-yellow-400' : 'text-slate-300'}`}>▼</span></button>
-                        {expandedLeague === league.id && (
-                          <div className="p-10 bg-slate-50/50 border-t-2 border-slate-100 animate-in slide-in-from-top-6">
-                             {isAdmin && (
-                               <div className="mb-10 pb-10 border-b-2 border-dashed border-slate-200"><h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-[#002868] mb-4 italic">Panel de Administrador</h4><div className="flex flex-col gap-2"><div className="flex gap-3"><input type="email" placeholder="Email del jugador a sumar..." className={`flex-1 bg-white rounded-2xl px-6 py-4 font-black text-slate-900 shadow-sm border-2 outline-none transition-all ${newMemberError[league.id] ? 'border-red-500 focus:ring-red-500/10' : 'border-slate-100 focus:border-yellow-400'}`} value={newMemberEmail[league.id] || ""} onChange={(e) => { setNewMemberEmail(prev => ({ ...prev, [league.id]: e.target.value })); setNewMemberError(prev => ({ ...prev, [league.id]: "" })); }} /><button onClick={() => handleAddMember(league.id)} className="bg-yellow-400 text-[#001529] px-8 py-4 rounded-2xl font-black uppercase text-[10px] shadow-lg hover:bg-yellow-300 transition-all active:scale-95">SUMAR</button></div>{newMemberError[league.id] && <p className="text-red-500 font-black text-[10px] uppercase tracking-widest pl-2 italic">⚠️ {newMemberError[league.id]}</p>}</div></div>
-                             )}
-                             <div className="space-y-4"><h4 className="text-[10px] font-black uppercase tracking-[0.5em] text-slate-300 mb-6 italic">Tabla de Posiciones</h4>{[...(league.members || [])].sort((a, b) => { const userA = globalLeaderboard.find(u => u.email === a); const userB = globalLeaderboard.find(u => u.email === b); const pointsA = userA?.total_points || userA?.points || 0; const pointsB = userB?.total_points || userB?.points || 0; return pointsB - pointsA; }).map((email, idx) => {
-                                    const mUser = globalLeaderboard.find(u => u.email === email);
-                                    const isSelf = email === currentUser?.email;
-                                    return (
-                                      <div key={idx} className={`flex justify-between items-center bg-white p-6 rounded-[2.5rem] border-2 transition-all ${isSelf ? 'border-yellow-400 shadow-lg' : 'border-slate-100 shadow-sm hover:shadow-md'}`}><div className="flex items-center gap-6"><div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xs uppercase shadow-inner ${isSelf ? 'bg-yellow-400 text-[#001529]' : 'bg-slate-800 text-white'}`}>{email.substring(0, 2)}</div><div className="flex flex-col"><span className="font-black text-slate-800 text-xl uppercase italic tracking-tighter">{mUser?.name || mUser?.username || email.split('@')[0]}</span>{email === league.ownerEmail && <span className="text-[9px] font-black text-[#002868] uppercase tracking-[0.2em] italic">Fundador</span>}</div></div><div className="flex items-center gap-8"><div className="text-right"><span className="block font-black text-3xl text-[#001529] leading-none">{mUser?.total_points || mUser?.points || 0}</span><span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">PUNTOS</span></div>{isAdmin && email !== league.ownerEmail && <button onClick={() => handleRemoveMember(league.id, email)} className="w-10 h-10 flex items-center justify-center rounded-xl bg-red-50 text-red-400 hover:bg-red-500 hover:text-white transition-all shadow-sm">🗑️</button>}</div></div>
-                                    );
-                                })}</div>
-                          </div>
-                        )}
-                     </div>
-                   );
-                 })}
+               <div className="flex flex-col md:flex-row gap-6">
+                 <div className="flex-1 flex gap-3">
+                   <input type="text" placeholder="Nombre del torneo..." className="flex-1 bg-white rounded-[1.5rem] px-8 py-6 font-black text-slate-900 shadow-lg border-2 border-slate-100 outline-none focus:border-yellow-400 text-lg" value={newLeagueName} onChange={(e) => setNewLeagueName(e.target.value)} />
+                   <button onClick={handleCreateLeague} className="bg-[#002868] text-white px-10 py-6 rounded-[1.5rem] font-black uppercase text-xs shadow-2xl hover:bg-slate-800 transition-all active:scale-95">CREAR</button>
+                 </div>
                </div>
+               {leagues.map(league => (
+                 <div key={league.id} className="bg-white rounded-[3rem] p-8 shadow-xl border border-slate-200">
+                   <h4 className="font-black text-2xl uppercase italic text-[#001529]">{league.name}</h4>
+                   <p className="text-[10px] text-slate-400 font-bold mt-2">CÓDIGO: {league.invite_code}</p>
+                 </div>
+               ))}
             </div>
           </div>
         )}
@@ -616,12 +624,11 @@ const App: React.FC = () => {
                 <div className="space-y-12">
                   <form onSubmit={handleUpdateProfile} className="space-y-8">
                     <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 italic">Nombre</label><input type="text" className="w-full bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] px-6 py-4 font-black text-slate-800 outline-none focus:border-yellow-400 transition-all" value={profileForm.name} onChange={(e) => setProfileForm({...profileForm, name: e.target.value})} /></div>
-                    <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 italic">Contraseña</label><input type="password" placeholder="Opcional" className="w-full bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] px-6 py-4 font-black text-slate-800 outline-none focus:border-yellow-400 transition-all" value={profileForm.password} onChange={(e) => setProfileForm({...profileForm, password: e.target.value})} /></div>
+                    <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 italic">Nueva Contraseña</label><input type="password" placeholder="Opcional" className="w-full bg-slate-50 border-2 border-slate-100 rounded-[1.5rem] px-6 py-4 font-black text-slate-800 outline-none focus:border-yellow-400 transition-all" value={profileForm.password} onChange={(e) => setProfileForm({...profileForm, password: e.target.value})} /></div>
                     {profileSuccess && <p className="text-green-500 font-black text-[10px] uppercase tracking-widest italic">{profileSuccess}</p>}
                     <button type="submit" className="w-full bg-[#001529] text-white py-5 rounded-[1.5rem] font-black uppercase text-xs shadow-2xl hover:bg-slate-800 transition-all">GUARDAR</button>
                   </form>
                   
-                  {/* Opción de Cerrar Sesión en Perfil (Mobile/Tablet focus) */}
                   <div className="pt-10 border-t border-dashed border-slate-200">
                     <button 
                       onClick={handleLogout}
@@ -636,9 +643,11 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-10">
-                  <div>
-                    <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6 italic">Aciertos (Simulados)</h3>
-                    <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 no-scrollbar">
+                  <div className="bg-gradient-to-br from-yellow-400 to-yellow-600 p-8 rounded-[2.5rem] shadow-xl text-[#001529]">
+                    <h4 className="text-[10px] font-black uppercase tracking-widest mb-1 italic opacity-60">TU SCORE TOTAL</h4>
+                    <p className="text-5xl font-black italic tracking-tighter">{currentUser.total_points || 0} PTS</p>
+                  </div>
+                  <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2 no-scrollbar">
                       {currentPointsHistory.map((entry: any) => (
                         <div key={entry.id} className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex justify-between items-center shadow-sm">
                           <div className="flex flex-col">
@@ -648,11 +657,6 @@ const App: React.FC = () => {
                           <span className="bg-yellow-400 text-[#001529] px-4 py-1.5 rounded-xl font-black text-sm shadow-sm">+{entry.points}</span>
                         </div>
                       ))}
-                    </div>
-                  </div>
-                  <div className="bg-gradient-to-br from-yellow-400 to-yellow-600 p-8 rounded-[2.5rem] shadow-xl text-[#001529]">
-                    <h4 className="text-[10px] font-black uppercase tracking-widest mb-1 italic opacity-60">TU SCORE TOTAL</h4>
-                    <p className="text-5xl font-black italic tracking-tighter">{currentUser.total_points || 0} PTS</p>
                   </div>
                 </div>
               </div>
@@ -662,11 +666,22 @@ const App: React.FC = () => {
         
         {activeTab === 'reglas' && (
            <div className="bg-white rounded-[4rem] shadow-2xl p-10 sm:p-20 border-t-[16px] border-yellow-400 animate-in zoom-in duration-500 relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-96 h-96 bg-yellow-400/5 rounded-full blur-3xl -mr-48 -mt-48"></div>
-              <h2 className="text-5xl sm:text-7xl font-black uppercase italic tracking-tighter text-[#001529] text-center mb-16 relative z-10">Mística Woombi</h2>
+              <h2 className="text-5xl sm:text-7xl font-black uppercase italic tracking-tighter text-[#001529] text-center mb-16">Mística Woombi</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-12 relative z-10">
-                 <div className="space-y-10"><div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-[#002868] shadow-sm"><h3 className="font-black text-2xl mb-6 flex items-center gap-4">⏳ CIERRE DE ESTADIO</h3><p className="font-bold text-slate-600 leading-relaxed uppercase text-sm tracking-wide">Las predicciones se bloquean <span className="text-[#002868]">1 hora antes</span> del silbatazo inicial.</p></div><div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-yellow-400 shadow-sm"><h3 className="font-black text-2xl mb-6 flex items-center gap-4">🔢 SISTEMA DE PUNTOS</h3><ul className="space-y-5"><li className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100"><div className="flex flex-col"><span className="font-black text-slate-800 text-lg italic">RESULTADO EXACTO</span><span className="text-[10px] text-slate-400 font-bold tracking-widest">PEGAS EL SCORE COMPLETO</span></div><span className="bg-yellow-400 text-[#001529] px-6 py-2 rounded-xl font-black text-xl">3 PTS</span></li><li className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100"><div className="flex flex-col"><span className="font-black text-slate-800 text-lg italic">GANADOR / EMPATE</span><span className="text-[10px] text-slate-400 font-bold tracking-widest">PEGAS SOLO LA TENDENCIA</span></div><span className="bg-[#002868] text-white px-6 py-2 rounded-xl font-black text-xl">1 PT</span></li></ul></div></div>
-                 <div className="space-y-10"><div className="bg-[#001529] p-10 rounded-[3rem] text-white shadow-2xl border-b-[12px] border-yellow-400"><h3 className="font-black text-2xl mb-6 flex items-center gap-4 text-yellow-400">🏅 BONO CAMPEÓN</h3><p className="font-bold text-slate-300 leading-relaxed uppercase text-sm tracking-wide mb-8 italic">Si tu candidato levanta la Copa el 19 de Julio de 2026...</p><div className="flex items-center justify-center bg-white/10 p-10 rounded-[2rem] border-2 border-dashed border-white/20"><div className="text-center"><span className="block text-[10px] font-black tracking-[0.4em] text-yellow-400 mb-2">GRAN PREMIO</span><span className="text-7xl font-black text-white italic tracking-tighter">HASTA 50 <span className="text-3xl">PTS</span></span></div></div></div></div>
+                 <div className="space-y-10">
+                   <div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-[#002868] shadow-sm">
+                     <h3 className="font-black text-2xl mb-4">⏳ CIERRE DE ESTADIO</h3>
+                     <p className="font-bold text-slate-600 uppercase text-sm tracking-wide">Las predicciones se bloquean 1 hora antes del partido.</p>
+                   </div>
+                   <div className="bg-slate-50 p-10 rounded-[3rem] border-l-[12px] border-yellow-400 shadow-sm">
+                     <h3 className="font-black text-2xl mb-4">🔢 PUNTOS</h3>
+                     <p className="font-bold text-slate-600 uppercase text-sm tracking-wide">Exacto: 3 pts | Tendencia: 1 pt</p>
+                   </div>
+                 </div>
+                 <div className="bg-[#001529] p-10 rounded-[3rem] text-white shadow-2xl border-b-[12px] border-yellow-400">
+                    <h3 className="font-black text-2xl mb-6 text-yellow-400">🏅 BONO CAMPEÓN</h3>
+                    <p className="font-bold text-slate-300 uppercase text-sm tracking-wide mb-8 italic">Si aciertas el campeón antes del 11 de Junio recibes 50 puntos extra.</p>
+                 </div>
               </div>
            </div>
         )}
